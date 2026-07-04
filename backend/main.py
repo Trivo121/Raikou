@@ -3,11 +3,16 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from app.core.config import settings
 from app.api.routes import projects, ingestion
+from app.services.models.sarclip_encoder import SARCLIPEncoder
 
 app = FastAPI(
     title=settings.PROJECT_NAME,
     openapi_url=f"{settings.API_V1_STR}/openapi.json"
 )
+
+@app.on_event("startup")
+async def _startup():
+    SARCLIPEncoder.load_singleton()
 
 # Set all CORS enabled origins
 app.add_middleware(
