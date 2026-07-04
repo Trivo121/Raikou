@@ -4,5 +4,5 @@ A scalable SAR (Synthetic Aperture Radar) processing pipeline with a FastAPI bac
 
 ## Project Structure
 
-- `frontend/` - React + Vite frontend application
+- `frontend/` - React frontend application
 - `backend/` - FastAPI backend application
