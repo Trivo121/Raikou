@@ -1,17 +1,66 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import { 
   Search, Grid, Archive, Plus, Users, ChevronDown 
 } from 'lucide-react';
+import { getSupabase } from '../App';
 
 export default function Dashboard() {
   const [activeTab, setActiveTab] = useState('All');
   const [copySuccess, setCopySuccess] = useState(false);
+  const [profile, setProfile] = useState(null);
+
+  useEffect(() => {
+    async function fetchProfile() {
+      const supabase = getSupabase();
+      if (!supabase) return;
+      
+      const { data: { session } } = await supabase.auth.getSession();
+      if (!session) {
+        window.history.pushState({}, '', '/login');
+        window.dispatchEvent(new PopStateEvent('popstate'));
+        return;
+      }
+
+      if (session) {
+        // Fetch from the public.profiles table
+        const { data, error } = await supabase
+          .from('profiles')
+          .select('*')
+          .eq('id', session.user.id)
+          .single();
+          
+        if (data && !error) {
+          setProfile(data);
+        } else {
+          // If no profile found (e.g. trigger didn't run because user existed before trigger was created),
+          // fallback to auth metadata
+          setProfile({
+            full_name: session.user.user_metadata?.full_name || session.user.email,
+            avatar_url: session.user.user_metadata?.avatar_url
+          });
+        }
+      }
+    }
+    fetchProfile();
+  }, []);
 
   // Simple copy link logic
   const handleCopyLink = () => {
     navigator.clipboard.writeText(window.location.href);
     setCopySuccess(true);
     setTimeout(() => setCopySuccess(false), 2000);
+  };
+
+  const handleLogout = async () => {
+    const supabase = getSupabase();
+    if (supabase) {
+      await supabase.auth.signOut();
+    }
+  };
+
+  const handleNewProject = () => {
+    window.history.pushState({}, '', '/ingestion');
+    window.dispatchEvent(new PopStateEvent('popstate'));
   };
 
   // Redesigned navigation items
@@ -40,11 +89,15 @@ export default function Dashboard() {
         {/* Workspace Dropdown Selector */}
         <div className="flex items-center justify-between p-1.5 mb-2.5 hover:bg-[#1a1a1f] rounded-lg cursor-pointer transition-colors duration-150 group">
           <div className="flex items-center gap-2">
-            <div className="w-5.5 h-5.5 rounded bg-[#0088ff] flex items-center justify-center text-[11px] font-bold text-white uppercase">
-              V
-            </div>
-            <span className="text-white font-medium text-[13px] tracking-tight">
-              Viswanath's Workspace
+            {profile?.avatar_url ? (
+              <img src={profile.avatar_url} alt="Avatar" className="w-5.5 h-5.5 rounded" style={{ width: '22px', height: '22px' }} />
+            ) : (
+              <div className="w-5.5 h-5.5 rounded bg-[#0088ff] flex items-center justify-center text-[11px] font-bold text-white uppercase" style={{ width: '22px', height: '22px' }}>
+                {profile?.full_name ? profile.full_name.charAt(0).toUpperCase() : 'U'}
+              </div>
+            )}
+            <span className="text-white font-medium text-[13px] tracking-tight truncate max-w-[130px]">
+              {profile?.full_name ? `${profile.full_name.split(' ')[0]}'s Workspace` : 'My Workspace'}
             </span>
           </div>
           <ChevronDown size={14} className="text-zinc-500 group-hover:text-zinc-300 transition-colors" />
@@ -132,8 +185,13 @@ export default function Dashboard() {
             </button>
 
             {/* Accent Primary Blue Action Button */}
-            <button className="bg-[#0088ff] hover:bg-[#007cdb] active:scale-[0.97] transition-all text-white font-semibold px-3 py-1.5 rounded-lg text-[12px]">
+            <button onClick={handleNewProject} className="bg-[#0088ff] hover:bg-[#007cdb] active:scale-[0.97] transition-all text-white font-semibold px-3 py-1.5 rounded-lg text-[12px]">
               New Project
+            </button>
+
+            {/* Logout Button */}
+            <button onClick={handleLogout} className="bg-transparent border border-red-900/50 hover:bg-red-950/30 text-red-400 hover:text-red-300 active:scale-[0.97] transition-all font-semibold px-3 py-1.5 rounded-lg text-[12px] ml-2">
+              Sign Out
             </button>
 
           </div>

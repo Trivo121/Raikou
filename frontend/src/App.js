@@ -2,6 +2,7 @@ import React, { useState, useEffect } from 'react';
 import Landing from './pages/Landing.js';
 import Dashboard from './pages/Dashboard.js';
 import Login from './pages/Login.js';
+import Ingestion from './pages/Ingestion.js';
 import { createClient } from '@supabase/supabase-js';
 
 // Lazy client initialization to prevent app crash if env vars are undefined on load
@@ -40,6 +41,17 @@ function App() {
     // Listen for back/forward navigation
     window.addEventListener('popstate', handleLocationChange);
 
+    // Check for OAuth errors in the URL hash
+    if (window.location.hash && window.location.hash.includes('error=')) {
+      const hashParams = new URLSearchParams(window.location.hash.substring(1));
+      const errorStr = hashParams.get('error');
+      const errorDesc = hashParams.get('error_description');
+      if (errorStr) {
+        alert(`Supabase Auth Error: ${errorStr}\nDescription: ${errorDesc}\n\nThis usually means your Google OAuth or Database Trigger failed.`);
+        window.location.hash = ''; // Clear it so it doesn't alert again on reload
+      }
+    }
+
     const supabase = getSupabase();
     let subscription = null;
 
@@ -57,11 +69,15 @@ function App() {
       const { data } = supabase.auth.onAuthStateChange((_event, session) => {
         setSession(session);
         if (session) {
-          window.history.pushState({}, '', '/dashboard');
-          setCurrentPath('/dashboard');
+          if (window.location.pathname === '/login' || window.location.pathname === '/') {
+            window.history.pushState({}, '', '/dashboard');
+            setCurrentPath('/dashboard');
+          }
         } else {
-          window.history.pushState({}, '', '/login');
-          setCurrentPath('/login');
+          if (window.location.pathname === '/dashboard') {
+            window.history.pushState({}, '', '/login');
+            setCurrentPath('/login');
+          }
         }
       });
       subscription = data.subscription;
@@ -79,6 +95,8 @@ function App() {
   switch (currentPath) {
     case '/dashboard':
       return <Dashboard />;
+    case '/ingestion':
+      return <Ingestion />;
     case '/login':
     case '/auth':
       return <Login />;

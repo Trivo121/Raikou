@@ -1,4 +1,4 @@
-import React, { useEffect } from 'react';
+import React, { useEffect, useState } from 'react';
 
 /* ─────────────────────────────────────────────
    KEYFRAME ANIMATIONS
@@ -115,6 +115,8 @@ const sectionHeading = {
    COMPONENT
 ───────────────────────────────────────────── */
 export default function Landing() {
+  const [session, setSession] = useState(null);
+
   /* Load Space Grotesk (closest public match to GT Walsheim) + Inter */
   useEffect(() => {
     const link = document.createElement('link');
@@ -122,6 +124,16 @@ export default function Landing() {
     link.href = 'https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;600&family=Inter:wght@400;500&display=swap';
     document.head.appendChild(link);
     return () => document.head.removeChild(link);
+  }, []);
+
+  useEffect(() => {
+    import('../App').then(({ getSupabase }) => {
+      const supabase = getSupabase();
+      if (supabase) {
+        supabase.auth.getSession().then(({ data }) => setSession(data.session));
+        supabase.auth.onAuthStateChange((_event, sess) => setSession(sess));
+      }
+    });
   }, []);
 
   /* Both CTAs are placeholders — Supabase auth wired in Login.js */
@@ -133,6 +145,22 @@ export default function Landing() {
   return (
     <>
       <style>{KEYFRAMES}</style>
+
+      {/* Debug Info */}
+      <div className="fixed bottom-4 left-4 z-[999] bg-black/80 text-white p-4 rounded-lg text-xs font-mono border border-white/20 shadow-xl backdrop-blur-md">
+        <strong className="text-blue-400">DEBUG INFO</strong><br/>
+        Auth State: {session ? '🟢 Authenticated' : '🔴 Unauthenticated'}<br/>
+        User ID: {session?.user?.id || 'None'}<br/>
+        <button 
+          onClick={() => {
+            window.history.pushState({}, '', '/dashboard');
+            window.dispatchEvent(new PopStateEvent('popstate'));
+          }}
+          className="mt-2 px-2 py-1 bg-white/10 hover:bg-white/20 rounded border border-white/20"
+        >
+          Force Route to /dashboard
+        </button>
+      </div>
 
       <div
         style={{ ...bodyFont, backgroundColor: T.bg, color: T.text, fontSize: '14px', lineHeight: '1.65', overflowX: 'hidden', minHeight: '100vh' }}

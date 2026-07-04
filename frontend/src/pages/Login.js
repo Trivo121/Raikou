@@ -34,6 +34,9 @@ export default function Login() {
   const [isSignUp, setIsSignUp] = useState(false);
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
+  const [isLoading, setIsLoading] = useState(false);
+  const [error, setError] = useState(null);
+  const [successMsg, setSuccessMsg] = useState(null);
 
   useEffect(() => {
     // Inject fonts if not already loaded globally
@@ -44,10 +47,34 @@ export default function Login() {
     return () => document.head.removeChild(link);
   }, []);
 
-  // Placeholder form handler for future Supabase integration
-  const handleSubmit = (e) => {
+  const handleSubmit = async (e) => {
     e.preventDefault();
-    console.log(`Supabase ${isSignUp ? 'Signup' : 'Login'} Triggered:`, { email, password });
+    setIsLoading(true);
+    setError(null);
+    setSuccessMsg(null);
+
+    const client = getSupabase();
+    if (!client) {
+      setError("Supabase client not initialized.");
+      setIsLoading(false);
+      return;
+    }
+
+    try {
+      if (isSignUp) {
+        const { error } = await client.auth.signUp({ email, password });
+        if (error) throw error;
+        setSuccessMsg("Success! Please check your email to confirm your account.");
+      } else {
+        const { error } = await client.auth.signInWithPassword({ email, password });
+        if (error) throw error;
+        // App.js auth listener will handle redirect
+      }
+    } catch (err) {
+      setError(err.message);
+    } finally {
+      setIsLoading(false);
+    }
   };
 
   const handleGoogleAuth = async () => {
@@ -64,6 +91,9 @@ export default function Login() {
     }
     const { data, error } = await client.auth.signInWithOAuth({
       provider: 'google',
+      options: {
+        redirectTo: window.location.origin,
+      },
     });
     if (error) {
       console.error('Error logging in with Google:', error.message);
@@ -139,6 +169,18 @@ export default function Login() {
               </p>
             </div>
 
+            {error && (
+              <div className="mb-5 p-3 rounded-lg text-xs" style={{ backgroundColor: 'rgba(255,50,50,0.1)', color: '#ff6b6b', border: '1px solid rgba(255,50,50,0.2)' }}>
+                {error}
+              </div>
+            )}
+            
+            {successMsg && (
+              <div className="mb-5 p-3 rounded-lg text-xs" style={{ backgroundColor: 'rgba(50,255,100,0.1)', color: '#4ade80', border: '1px solid rgba(50,255,100,0.2)' }}>
+                {successMsg}
+              </div>
+            )}
+
             {/* Main Form */}
             <form onSubmit={handleSubmit} className="flex flex-col gap-5">
 
@@ -202,12 +244,13 @@ export default function Login() {
               {/* Submit Button */}
               <button
                 type="submit"
-                className="w-full h-12 mt-2 rounded-xl font-medium text-white transition-all active:scale-[0.98]"
+                disabled={isLoading}
+                className="w-full h-12 mt-2 rounded-xl font-medium text-white transition-all active:scale-[0.98] disabled:opacity-50 disabled:cursor-not-allowed"
                 style={{ backgroundColor: T.accent, fontSize: '14.5px' }}
-                onMouseEnter={e => e.currentTarget.style.backgroundColor = T.accentHover}
-                onMouseLeave={e => e.currentTarget.style.backgroundColor = T.accent}
+                onMouseEnter={e => { if (!isLoading) e.currentTarget.style.backgroundColor = T.accentHover; }}
+                onMouseLeave={e => { if (!isLoading) e.currentTarget.style.backgroundColor = T.accent; }}
               >
-                {isSignUp ? 'Apply for Beta' : 'Log in'}
+                {isLoading ? 'Processing...' : (isSignUp ? 'Apply for Beta' : 'Log in')}
               </button>
             </form>
 
