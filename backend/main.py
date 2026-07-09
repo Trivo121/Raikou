@@ -2,7 +2,7 @@ import uvicorn
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from app.core.config import settings
-from app.api.routes import projects, ingestion
+from app.api.routes import projects, ingestion, processing, search
 from app.services.models.sarclip_encoder import SARCLIPEncoder
 
 app = FastAPI(
@@ -18,13 +18,15 @@ async def _startup():
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],  # Adjust in production
-    allow_credentials=True,
+    allow_credentials=False,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
 app.include_router(projects.router, prefix=f"{settings.API_V1_STR}/projects", tags=["projects"])
 app.include_router(ingestion.router, prefix=f"{settings.API_V1_STR}/ingestion", tags=["ingestion"])
+app.include_router(processing.router, prefix=f"{settings.API_V1_STR}/processing", tags=["processing"])
+app.include_router(search.router, prefix=f"{settings.API_V1_STR}/search", tags=["search"])
 
 @app.get("/")
 def root():

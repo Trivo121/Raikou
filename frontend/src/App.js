@@ -3,6 +3,7 @@ import Landing from './pages/Landing.js';
 import Dashboard from './pages/Dashboard.js';
 import Login from './pages/Login.js';
 import Ingestion from './pages/Ingestion.js';
+import Chat from './pages/Chat.js';
 import { createClient } from '@supabase/supabase-js';
 
 // Lazy client initialization to prevent app crash if env vars are undefined on load
@@ -97,6 +98,8 @@ function App() {
       return <Dashboard />;
     case '/ingestion':
       return <Ingestion />;
+    case '/chat':
+      return <Chat />;
     case '/login':
     case '/auth':
       return <Login />;

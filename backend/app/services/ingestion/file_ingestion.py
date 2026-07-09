@@ -2,6 +2,12 @@ import zipfile
 import xml.etree.ElementTree as ET
 from fastapi import UploadFile, HTTPException
 import io
+import os
+import uuid
+import tempfile
+import rasterio
+import json
+from typing import List
 
 def validate_zip_is_grd(zip_ref: zipfile.ZipFile) -> bool:
     manifest_info = None
@@ -77,14 +83,8 @@ def extract_metadata(zip_ref: zipfile.ZipFile) -> dict:
                 
     return metadata
 
-import os
-import uuid
-import tempfile
-import rasterio
-
 def _build_vrt(zip_path: str, tiff_paths: list[str]) -> str:
     """Builds a VRT XML string stacking the given tiff paths from within the zip."""
-    # Open the first tiff to get dimensions
     first_tiff = f"/vsizip/{zip_path}/{tiff_paths[0]}"
     with rasterio.open(first_tiff) as src:
         w, h = src.width, src.height
@@ -103,41 +103,67 @@ def _build_vrt(zip_path: str, tiff_paths: list[str]) -> str:
     vrt_xml += '</VRTDataset>'
     return vrt_xml
 
-async def process_grd_file(file: UploadFile) -> dict:
-    if not file.filename.endswith('.zip'):
-         raise HTTPException(status_code=400, detail="Uploaded file must be a .zip SAFE archive.")
+def _build_vrt_local(tiff_paths: list[str]) -> str:
+    """Builds a VRT XML string stacking local tiff files directly from disk."""
+    with rasterio.open(tiff_paths[0]) as src:
+        w, h = src.width, src.height
+        # Use source data type
+        dt = src.dtypes[0]
+        # Map rasterio dtype to VRT datatype
+        dtype_map = {
+            'uint8': 'Byte',
+            'uint16': 'UInt16',
+            'int16': 'Int16',
+            'uint32': 'UInt32',
+            'int32': 'Int32',
+            'float32': 'Float32',
+            'float64': 'Float64'
+        }
+        vrt_dt = dtype_map.get(dt, 'Float32')
+        
+    vrt_xml = f'<VRTDataset rasterXSize="{w}" rasterYSize="{h}">\n'
+    for i, tiff in enumerate(tiff_paths, 1):
+        vrt_xml += f'''  <VRTRasterBand dataType="{vrt_dt}" band="{i}">
+    <SimpleSource>
+      <SourceFilename relativeToVRT="0">{os.path.basename(tiff)}</SourceFilename>
+      <SourceBand>1</SourceBand>
+      <SrcRect xOff="0" yOff="0" xSize="{w}" ySize="{h}" />
+      <DstRect xOff="0" yOff="0" xSize="{w}" ySize="{h}" />
+    </SimpleSource>
+  </VRTRasterBand>\n'''
+    vrt_xml += '</VRTDataset>'
+    return vrt_xml
+
+
+async def process_zip_upload(file: UploadFile, session_dir: str, session_id: str) -> dict:
+    zip_path = os.path.join(session_dir, "scene.zip")
     
-    content = await file.read()
-    
+    with open(zip_path, "wb") as f:
+        while chunk := await file.read(1024 * 1024 * 10):
+            f.write(chunk)
+            
     try:
-        zip_ref = zipfile.ZipFile(io.BytesIO(content))
+        zip_ref = zipfile.ZipFile(zip_path, 'r')
     except zipfile.BadZipFile:
         raise HTTPException(status_code=400, detail="Invalid zip file format.")
     
-    if not validate_zip_is_grd(zip_ref):
-        raise HTTPException(status_code=400, detail="The uploaded file is not a valid Sentinel-1 GRD product.")
+    if validate_zip_is_grd(zip_ref):
+        metadata = extract_metadata(zip_ref)
+        tiffs = [f.filename for f in zip_ref.filelist if '/measurement/' in f.filename and f.filename.endswith('.tiff')]
+    else:
+        tiffs = [f.filename for f in zip_ref.filelist if f.filename.lower().endswith(('.tif', '.tiff'))]
+        metadata = {
+            "polarization": ["Unknown"],
+            "sensor": "Generic Zipped TIFF",
+            "acquisition_date": "Unknown",
+            "bounding_box": "Unknown"
+        }
         
-    metadata = extract_metadata(zip_ref)
-    
-    # Save the zip to a temporary directory
-    session_id = uuid.uuid4().hex
-    temp_dir = tempfile.gettempdir()
-    session_dir = os.path.join(temp_dir, f"raikou_session_{session_id}")
-    os.makedirs(session_dir, exist_ok=True)
-    
-    zip_path = os.path.join(session_dir, "scene.zip")
-    with open(zip_path, "wb") as f:
-        f.write(content)
-        
-    # Find measurement tiffs (VV, VH, etc)
-    tiffs = [f.filename for f in zip_ref.filelist if '/measurement/' in f.filename and f.filename.endswith('.tiff')]
-    # Sort so VV is first if it exists, for consistency
-    tiffs.sort(key=lambda x: 0 if 'vv' in x.lower() else (1 if 'vh' in x.lower() else 2))
-    
     if not tiffs:
         raise HTTPException(status_code=400, detail="No measurement TIFF files found in the archive.")
         
-    # Build VRT
+    tiffs.sort(key=lambda x: 0 if 'vv' in x.lower() else (1 if 'vh' in x.lower() else 2))
+        
     vrt_xml = _build_vrt(zip_path.replace("\\", "/"), tiffs)
     vrt_path = os.path.join(session_dir, "stacked.vrt")
     with open(vrt_path, "w") as f:
@@ -148,3 +174,83 @@ async def process_grd_file(file: UploadFile) -> dict:
         "vrt_path": vrt_path.replace("\\", "/"),
         "metadata": metadata
     }
+
+
+async def process_tiff_uploads(files: List[UploadFile], session_dir: str, session_id: str) -> dict:
+    tiff_files = []
+    json_file = None
+    
+    for f in files:
+        if f.filename.lower().endswith(('.tif', '.tiff')):
+            tiff_files.append(f)
+        elif f.filename.lower().endswith('.json'):
+            json_file = f
+            
+    if not tiff_files:
+        raise HTTPException(status_code=400, detail="No valid TIFF files found.")
+        
+    # Sort files to prioritize VV then VH if named explicitly
+    tiff_files.sort(key=lambda x: 0 if 'vv' in x.filename.lower() else (1 if 'vh' in x.filename.lower() else 2))
+    
+    local_tiff_paths = []
+    for f in tiff_files:
+        path = os.path.join(session_dir, os.path.basename(f.filename))
+        with open(path, "wb") as out:
+            while chunk := await f.read(1024 * 1024 * 10):
+                out.write(chunk)
+        local_tiff_paths.append(path)
+        
+    metadata = {
+        "polarization": ["Unknown"],
+        "sensor": "Generic TIFF",
+        "acquisition_date": "Unknown",
+        "bounding_box": "Unknown"
+    }
+    
+    if json_file:
+        try:
+            content = await json_file.read()
+            custom_meta = json.loads(content)
+            if "properties" in custom_meta:
+                props = custom_meta["properties"]
+                metadata["sensor"] = props.get("platform", metadata["sensor"])
+                metadata["acquisition_date"] = props.get("datetime", metadata["acquisition_date"])
+                if "sar:polarizations" in props:
+                    metadata["polarization"] = props["sar:polarizations"]
+            else:
+                metadata["sensor"] = custom_meta.get("sensor", metadata["sensor"])
+                metadata["polarization"] = custom_meta.get("polarization", metadata["polarization"])
+        except Exception:
+            pass
+
+    vrt_xml = _build_vrt_local(local_tiff_paths)
+    vrt_path = os.path.join(session_dir, "stacked.vrt")
+    with open(vrt_path, "w") as f:
+        f.write(vrt_xml)
+        
+    return {
+        "session_id": session_id,
+        "vrt_path": vrt_path.replace("\\", "/"),
+        "metadata": metadata
+    }
+
+async def process_uploaded_files(files: List[UploadFile]) -> dict:
+    if not files:
+        raise HTTPException(status_code=400, detail="No files provided.")
+        
+    session_id = uuid.uuid4().hex
+    temp_dir = tempfile.gettempdir()
+    session_dir = os.path.join(temp_dir, f"raikou_session_{session_id}")
+    os.makedirs(session_dir, exist_ok=True)
+    
+    zip_files = [f for f in files if f.filename.lower().endswith('.zip')]
+    if zip_files:
+        result = await process_zip_upload(zip_files[0], session_dir, session_id)
+    else:
+        result = await process_tiff_uploads(files, session_dir, session_id)
+        
+    metadata_path = os.path.join(session_dir, "metadata.json")
+    with open(metadata_path, "w") as f:
+        json.dump(result["metadata"], f)
+        
+    return result

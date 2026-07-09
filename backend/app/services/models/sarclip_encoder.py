@@ -97,6 +97,22 @@ class SARCLIPEncoder:
         self.model = model
         # Built once here, reused for every patch across every session.
         self.preprocess = preprocess
+        
+        # Initialize tokenizer for text queries
+        self.tokenizer = open_clip.get_tokenizer(MODEL_NAME)
+
+    def encode_text(self, text: str) -> list[float]:
+        """Encodes a text string into a L2-normalized 768-d embedding."""
+        tokens = self.tokenizer([text]).to(DEVICE)
+        
+        with torch.no_grad(), _autocast_ctx():
+            text_features = self.model.encode_text(tokens)
+            
+        text_features = text_features.float()
+        norms = text_features.norm(dim=-1, keepdim=True).clamp_min(1e-12)
+        text_features = (text_features / norms).cpu()
+        
+        return text_features[0].tolist()
 
     @classmethod
     def load_singleton(cls) -> "SARCLIPEncoder":

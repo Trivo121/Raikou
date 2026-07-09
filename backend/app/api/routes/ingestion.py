@@ -1,14 +1,15 @@
 from fastapi import APIRouter, UploadFile, File, HTTPException
-from app.services.ingestion.file_ingestion import process_grd_file
+from typing import List
+from app.services.ingestion.file_ingestion import process_uploaded_files
 
 router = APIRouter()
 
 @router.post("/upload")
-async def upload_sar_file(file: UploadFile = File(...)):
+async def upload_sar_file(files: List[UploadFile] = File(...)):
     try:
-        session_data = await process_grd_file(file)
+        session_data = await process_uploaded_files(files)
         return {
-            "filename": file.filename,
+            "filenames": [f.filename for f in files],
             "status": "Uploaded successfully",
             "session_data": session_data
         }

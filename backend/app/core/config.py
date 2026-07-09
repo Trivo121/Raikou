@@ -4,8 +4,8 @@ class Settings(BaseSettings):
     PROJECT_NAME: str = "SAR Pipeline API"
     API_V1_STR: str = "/api/v1"
     
-    QDRANT_HOST: str = "localhost"
-    QDRANT_PORT: int = 6333
+    QDRANT_URL: str = ""
+    QDRANT_API_KEY: str = ""
     
     AWS_ACCESS_KEY_ID: str | None = None
     AWS_SECRET_ACCESS_KEY: str | None = None

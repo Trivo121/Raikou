@@ -2,6 +2,11 @@ import uuid
 import logging
 from dataclasses import dataclass, field
 from typing import Iterator, Optional
+import base64
+import os
+import tempfile
+import io
+from PIL import Image
 
 import numpy as np
 import rasterio
@@ -208,3 +213,40 @@ def estimate_patch_count(width: int, height: int) -> PatchPlan:
     call this from the ingestion response / a progress endpoint before
     encoding starts, so the user knows what they're in for."""
     return plan_patches(width, height)
+
+
+# --------------------------------------------------------------------------
+# Multi-Modal Orchestrator Helpers
+# --------------------------------------------------------------------------
+
+def get_base64_patches(session_id: str, coordinates: list[tuple[int, int]]) -> list[str]:
+    """
+    Takes top-K patch coordinates (row, col), reads them from stacked.vrt, and returns
+    base64 encoded JPEG strings in memory for the VLM.
+    """
+    temp_dir = tempfile.gettempdir()
+    session_dir = os.path.join(temp_dir, f"raikou_session_{session_id}")
+    vrt_path = os.path.join(session_dir, "stacked.vrt")
+    
+    if not os.path.exists(vrt_path):
+        logger.error(f"VRT file not found: {vrt_path}")
+        return []
+
+    base64_images = []
+    
+    try:
+        with rasterio.open(vrt_path) as dataset:
+            for row, col in coordinates:
+                window = Window(col, row, PATCH_SIZE, PATCH_SIZE)
+                raw_patch = dataset.read(window=window)
+                processed = preprocess_patch(raw_patch)
+                if processed is not None:
+                    image = Image.fromarray(processed)
+                    buf = io.BytesIO()
+                    image.save(buf, format="JPEG")
+                    b64_str = base64.b64encode(buf.getvalue()).decode('utf-8')
+                    base64_images.append(b64_str)
+    except Exception as e:
+        logger.error(f"Failed to extract base64 patches: {e}")
+        
+    return base64_images

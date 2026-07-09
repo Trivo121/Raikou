@@ -1,8 +1,83 @@
-class QdrantStore:
-    def __init__(self, host: str, port: int):
-        self.host = host
-        self.port = port
+from qdrant_client import QdrantClient
+from qdrant_client.models import Distance, VectorParams, PointStruct, Filter, FieldCondition, MatchValue
+from app.core.config import settings
+import uuid
 
-    def upsert_vectors(self, collection_name: str, vectors: list):
-        # Insert vectors into Qdrant database
-        pass
+class QdrantStore:
+    _instance = None
+    
+    def __init__(self):
+        self.client = QdrantClient(
+            url=settings.QDRANT_URL,
+            api_key=settings.QDRANT_API_KEY
+        )
+        
+    @classmethod
+    def get_instance(cls):
+        if cls._instance is None:
+            cls._instance = cls()
+        return cls._instance
+
+    def initialize_collection(self, collection_name: str, vector_size: int = 768):
+        if not self.client.collection_exists(collection_name=collection_name):
+            self.client.create_collection(
+                collection_name=collection_name,
+                vectors_config=VectorParams(size=vector_size, distance=Distance.COSINE)
+            )
+
+    def upsert_vectors(self, collection_name: str, points: list[dict]):
+        """
+        points is a list of dicts: {"id": str, "vector": list[float], "payload": dict}
+        """
+        qdrant_points = [
+            PointStruct(
+                id=p["id"],
+                vector=p["vector"],
+                payload=p.get("payload", {})
+            )
+            for p in points
+        ]
+        self.client.upsert(
+            collection_name=collection_name,
+            points=qdrant_points
+        )
+
+    def search_vectors(self, collection_name: str, query_vector: list[float], limit: int = 10) -> list[dict]:
+        """
+        Search for nearest neighbors in the given collection.
+        Returns a list of dicts with score, id, and payload.
+        """
+        search_result = self.client.search(
+            collection_name=collection_name,
+            query_vector=query_vector,
+            limit=limit
+        )
+        
+        results = []
+        for hit in search_result:
+            results.append({
+                "id": str(hit.id),
+                "score": hit.score,
+                "payload": hit.payload
+            })
+            
+        return results
+
+    def count_vectors_by_session(self, collection_name: str, session_id: str) -> int:
+        if not self.client.collection_exists(collection_name=collection_name):
+            return 0
+        try:
+            count_result = self.client.count(
+                collection_name=collection_name,
+                count_filter=Filter(
+                    must=[
+                        FieldCondition(
+                            key="session_id",
+                            match=MatchValue(value=session_id)
+                        )
+                    ]
+                )
+            )
+            return count_result.count
+        except Exception:
+            return 0

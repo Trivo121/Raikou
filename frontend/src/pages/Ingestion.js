@@ -84,46 +84,9 @@ const STEPS = [
 ];
 
 /* ─────────────────────────────────────────────
-   SIMULATED LOG STREAM
+   REAL INGESTION CONSTANTS
 ───────────────────────────────────────────── */
-const SIM_LOGS = [
-  { at: 400, msg: 'Initializing ingestion pipeline…' },
-  { at: 900, msg: 'Connecting to processing endpoint…' },
-  { at: 1600, msg: 'File transfer in progress — uploading 3 SAR scenes.' },
-  { at: 2800, msg: 'GeoTIFF headers decoded. CRS: EPSG:4326. Dimensions: 12416×8042 px.' },
-  { at: 3600, msg: 'Scene metadata extracted for all 3 files.' },
-  { at: 4700, msg: 'Applying radiometric calibration (σ° conversion)…' },
-  { at: 5500, msg: 'Lee speckle filter running — Scene_01…' },
-  { at: 6300, msg: 'Scene_01 conditioned. SNR delta: +6.4 dB.' },
-  { at: 6900, msg: 'Scene_02 conditioned. SNR delta: +5.9 dB.' },
-  { at: 7600, msg: 'Scene_03 conditioned. SNR delta: +6.1 dB.' },
-  { at: 8400, msg: 'Backscatter range normalised to [0, 1] via min-max scaling.' },
-  { at: 9300, msg: 'Starting 256×256 patch tiling across 3 scenes…' },
-  { at: 10100, msg: 'Tiling batch 1/4 — patches 0001–1125 written.' },
-  { at: 11000, msg: 'Tiling batch 2/4 — patches 1126–2250 written.' },
-  { at: 11900, msg: 'Tiling batch 3/4 — patches 2251–3375 written.' },
-  { at: 12700, msg: 'Tiling batch 4/4 — patches 3376–4500 written.' },
-  { at: 13300, msg: '4,500 patches generated from 3 SAR scenes.' },
-  { at: 14100, msg: 'Loading SARCLIP encoder (ViT-B/32 backbone)…' },
-  { at: 14900, msg: 'Encoding batch 01/50 — vectors 0001–0090 generated.' },
-  { at: 15500, msg: 'Encoding batch 12/50 — vectors 0991–1080 generated.' },
-  { at: 16100, msg: 'Encoding batch 25/50 — vectors 2161–2250 generated.' },
-  { at: 16800, msg: 'Encoding batch 38/50 — vectors 3331–3420 generated.' },
-  { at: 17500, msg: 'Encoding batch 50/50 — vectors 4411–4500 generated.' },
-  { at: 18100, msg: 'Pushing 4,500 FP16 vectors to Qdrant collection "sar_index"…' },
-  { at: 18900, msg: 'HNSW index built. Nearest-neighbour queries now active.' },
-  { at: 19400, msg: '✓ Ingestion complete — 4,500 patches indexed from 3 SAR scenes.' },
-];
-
-/* Step timing windows (ms) — must align with SIM_LOGS above */
-const STEP_WINDOWS = [
-  { start: 0, end: 4000 },   // Uploading & Extraction
-  { start: 4000, end: 9000 },   // Signal Conditioning
-  { start: 9000, end: 14000 },   // Patch Tiling
-  { start: 14000, end: 19600 },   // Vector Encoding & Indexing
-];
-
-const TOTAL_MS = 19600;
+const BACKEND_URL = process.env.REACT_APP_API_URL || 'http://localhost:8000';
 
 /* ─────────────────────────────────────────────
    HELPERS
@@ -205,39 +168,96 @@ export default function Ingestion() {
     timers.current = [];
   };
 
-  const startIngestion = () => {
+  const startIngestion = async () => {
+    if (files.length === 0) return;
     clearTimers();
     setView('processing');
     setProgress(0);
-    setCurrentStep(0);
+    setCurrentStep(0); // Uploading & Extraction
     setCompletedSteps([]);
     setLogs([]);
+    
+    pushLog('Initializing ingestion pipeline…');
+    pushLog('File transfer in progress — uploading to backend.');
 
-    /* Step transitions */
-    STEP_WINDOWS.forEach(({ start, end }, i) => {
-      timers.current.push(setTimeout(() => setCurrentStep(i), start));
-      timers.current.push(setTimeout(() => setCompletedSteps(p => [...p, i]), end));
-    });
+    const formData = new FormData();
+    files.forEach(f => formData.append('files', f));
 
-    /* Progress bar — linear over TOTAL_MS */
-    const TICK = 80;
-    let elapsed = 0;
-    const iv = setInterval(() => {
-      elapsed += TICK;
-      setProgress(Math.min(100, Math.round((elapsed / TOTAL_MS) * 100)));
-      if (elapsed >= TOTAL_MS) clearInterval(iv);
-    }, TICK);
+    try {
+      // 1. Upload
+      const uploadRes = await fetch(`${BACKEND_URL}/api/v1/ingestion/upload`, {
+        method: 'POST',
+        body: formData,
+      });
 
-    /* Log stream */
-    SIM_LOGS.forEach(({ at, msg }) => {
-      timers.current.push(setTimeout(() => pushLog(msg), at));
-    });
+      if (!uploadRes.ok) throw new Error(`Upload failed: ${uploadRes.statusText}`);
+      const uploadData = await uploadRes.json();
+      const sessionId = uploadData.session_data.session_id;
+      
+      pushLog(`File uploaded successfully. Session ID: ${sessionId}`);
+      setCompletedSteps(prev => [...prev, 0]);
+      setCurrentStep(1); // Signal Conditioning
+      setProgress(10);
+      pushLog('Conditioning and Tiling...');
+      
+      // Store session ID to local storage so Chat.js can use it
+      localStorage.setItem('raikou_session_id', sessionId);
 
-    /* Finalise */
-    timers.current.push(setTimeout(() => {
-      setProgress(100);
-      setView('success');
-    }, TOTAL_MS + 500));
+      // 2. Start Processing
+      const processRes = await fetch(`${BACKEND_URL}/api/v1/processing/${sessionId}`, {
+        method: 'POST',
+      });
+      if (!processRes.ok) throw new Error('Failed to trigger processing');
+      const processData = await processRes.json();
+      const estimated = processData.estimated_patches || 1;
+      
+      pushLog(`Processing started. Estimated patches: ${estimated}`);
+      setCompletedSteps(prev => [...prev, 1]);
+      setCurrentStep(2); // Patch Tiling
+      setProgress(20);
+      
+      // 3. Poll for Progress
+      let encoded = 0;
+      const pollInterval = setInterval(async () => {
+        try {
+          const statusRes = await fetch(`${BACKEND_URL}/api/v1/processing/status/${sessionId}`);
+          if (statusRes.ok) {
+            const statusData = await statusRes.json();
+            encoded = statusData.encoded_patches || 0;
+            
+            const currentProgress = 20 + Math.min(80, Math.round((encoded / estimated) * 80));
+            setProgress(currentProgress);
+            
+            if (encoded > 0 && !completedSteps.includes(2)) {
+              setCompletedSteps(prev => [...prev, 2]);
+              setCurrentStep(3);
+            }
+            
+            pushLog(`Encoding batch... ${encoded} / ${estimated} vectors generated.`);
+            
+            if (encoded >= estimated) {
+              clearInterval(pollInterval);
+              setCompletedSteps(prev => [...prev, 3]);
+              setProgress(100);
+              pushLog(`✓ Ingestion complete — ${encoded} patches indexed to Qdrant.`);
+              setTimeout(() => setView('success'), 1000);
+            }
+          }
+        } catch (e) {
+          console.warn("Polling error:", e);
+        }
+      }, 2000);
+      
+      // Safety timeout for polling
+      timers.current.push(setTimeout(() => {
+        clearInterval(pollInterval);
+        if (progress < 100) simulateError();
+      }, 60000 * 5)); // 5 minute max
+
+    } catch (e) {
+      setErrorDetail(e.message);
+      setView('error');
+    }
   };
 
   const simulateError = () => {
@@ -275,7 +295,7 @@ export default function Ingestion() {
   }, [view]); // eslint-disable-line
 
   const goWorkspace = () => {
-    window.history.pushState({}, '', '/dashboard');
+    window.history.pushState({}, '', '/chat');
     window.dispatchEvent(new PopStateEvent('popstate'));
   };
 
@@ -805,14 +825,12 @@ export default function Ingestion() {
                 style={{ border: `1px solid ${T.border}`, backgroundColor: T.card }}
               >
                 <p style={{ fontSize: '11px', letterSpacing: '0.14em', textTransform: 'uppercase', color: T.textGhost, marginBottom: '14px' }}>
-                  Checkpoint Status
+                  Processing Failed
                 </p>
                 <div className="flex flex-col gap-3.5">
                   {[
-                    { label: 'Completed steps', value: '1 / 4' },
-                    { label: 'Patches processed', value: '2,250 / 4,500' },
-                    { label: 'Vectors indexed', value: '2,250' },
-                    { label: 'Saved checkpoint', value: 'sar_ckpt_batch_25.pkl' },
+                    { label: 'Completed steps', value: `${completedSteps.length} / 4` },
+                    { label: 'Current progress', value: `${progress}%` },
                   ].map(({ label, value }) => (
                     <div key={label} className="flex items-center justify-between">
                       <span style={{ fontSize: '13px', color: T.textFaint }}>{label}</span>
@@ -934,7 +952,7 @@ export default function Ingestion() {
 
               {/* Redirect countdown */}
               <p className="mb-6" style={{ fontSize: '13px', color: T.textFaint, textAlign: 'center' }}>
-                Redirecting to Project Workspace in{' '}
+                Redirecting to Chat Interface in{' '}
                 <span style={{ ...monoFont, color: T.accent, fontWeight: 600 }}>{countdown}</span>
                 …
               </p>
@@ -947,7 +965,7 @@ export default function Ingestion() {
                 onMouseEnter={e => (e.currentTarget.style.backgroundColor = '#16a34a')}
                 onMouseLeave={e => (e.currentTarget.style.backgroundColor = T.success)}
               >
-                Go to Workspace Now
+                Go to Chat Interface Now
                 <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round">
                   <path d="M5 12h14M12 5l7 7-7 7" />
                 </svg>
