@@ -4,6 +4,7 @@ import Dashboard from './pages/Dashboard.js';
 import Login from './pages/Login.js';
 import Ingestion from './pages/Ingestion.js';
 import Chat from './pages/Chat.js';
+import Project from './pages/Project.js';
 import { createClient } from '@supabase/supabase-js';
 
 // Lazy client initialization to prevent app crash if env vars are undefined on load
@@ -91,6 +92,10 @@ function App() {
       }
     };
   }, []);
+
+  if (currentPath.startsWith('/project/')) {
+    return <Project />;
+  }
 
   // Simple path-based routing switch
   switch (currentPath) {

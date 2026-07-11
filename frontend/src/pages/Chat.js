@@ -9,38 +9,10 @@ import { getSupabase } from '../App';
 export default function Chat() {
     const [profile, setProfile] = useState(null);
     const [messageInput, setMessageInput] = useState('');
-    const [isSourcesOpen, setIsSourcesOpen] = useState(true);
+    const [isSourcesOpen, setIsSourcesOpen] = useState(false);
 
-    const [chatHistory, setChatHistory] = useState([
-        {
-            id: 1,
-            role: 'user',
-            content: 'Identify commercial cargo vessels traveling south in the Rotterdam scene.'
-        },
-        {
-            id: 2,
-            role: 'assistant',
-            content: 'Based on the SAR backscatter data from the Rotterdam scene, I have identified 3 distinct high-intensity anomalies matching the geometric signature of commercial cargo vessels. They are currently positioned in the outbound shipping lane on a southern trajectory. Coordinates and patch references are isolated in the sources panel.',
-            sources: ['patch_942', 'patch_945']
-        }
-    ]);
-
-    const [retrievedSources, setRetrievedSources] = useState([
-        {
-            id: 'patch_942',
-            title: 'Vessel Signature Alpha',
-            confidence: '98%',
-            scene: 'S1A_IW_SLC',
-            coords: '51.96° N, 4.02° E'
-        },
-        {
-            id: 'patch_945',
-            title: 'Vessel Signature Beta',
-            confidence: '94%',
-            scene: 'S1A_IW_SLC',
-            coords: '51.94° N, 3.98° E'
-        }
-    ]);
+    const [chatHistory, setChatHistory] = useState([]);
+    const [retrievedSources, setRetrievedSources] = useState([]);
 
     useEffect(() => {
         async function fetchProfile() {
@@ -132,6 +104,9 @@ export default function Chat() {
                                 msg.id === assistantMsgId ? { ...msg, content: msg.content + data.data } : msg
                             ));
                         } else if (data.type === 'error') {
+                            setChatHistory(prev => prev.map(msg =>
+                                msg.id === assistantMsgId ? { ...msg, content: msg.content + `\n\n⚠️ **Error:** ${data.data}` } : msg
+                            ));
                             console.error("VLM Error:", data.data);
                         }
                     } catch (e) {

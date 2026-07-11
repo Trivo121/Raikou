@@ -86,8 +86,11 @@ def extract_metadata(zip_ref: zipfile.ZipFile) -> dict:
 def _build_vrt(zip_path: str, tiff_paths: list[str]) -> str:
     """Builds a VRT XML string stacking the given tiff paths from within the zip."""
     first_tiff = f"/vsizip/{zip_path}/{tiff_paths[0]}"
-    with rasterio.open(first_tiff) as src:
-        w, h = src.width, src.height
+    try:
+        with rasterio.open(first_tiff) as src:
+            w, h = src.width, src.height
+    except Exception:
+        raise HTTPException(status_code=400, detail=f"Corrupted or invalid TIFF file in archive: {tiff_paths[0]}")
         
     vrt_xml = f'<VRTDataset rasterXSize="{w}" rasterYSize="{h}">\n'
     for i, tiff in enumerate(tiff_paths, 1):
@@ -105,21 +108,24 @@ def _build_vrt(zip_path: str, tiff_paths: list[str]) -> str:
 
 def _build_vrt_local(tiff_paths: list[str]) -> str:
     """Builds a VRT XML string stacking local tiff files directly from disk."""
-    with rasterio.open(tiff_paths[0]) as src:
-        w, h = src.width, src.height
-        # Use source data type
-        dt = src.dtypes[0]
-        # Map rasterio dtype to VRT datatype
-        dtype_map = {
-            'uint8': 'Byte',
-            'uint16': 'UInt16',
-            'int16': 'Int16',
-            'uint32': 'UInt32',
-            'int32': 'Int32',
-            'float32': 'Float32',
-            'float64': 'Float64'
-        }
-        vrt_dt = dtype_map.get(dt, 'Float32')
+    try:
+        with rasterio.open(tiff_paths[0]) as src:
+            w, h = src.width, src.height
+            # Use source data type
+            dt = src.dtypes[0]
+            # Map rasterio dtype to VRT datatype
+            dtype_map = {
+                'uint8': 'Byte',
+                'uint16': 'UInt16',
+                'int16': 'Int16',
+                'uint32': 'UInt32',
+                'int32': 'Int32',
+                'float32': 'Float32',
+                'float64': 'Float64'
+            }
+            vrt_dt = dtype_map.get(dt, 'Float32')
+    except Exception:
+        raise HTTPException(status_code=400, detail=f"Corrupted or invalid TIFF file: {os.path.basename(tiff_paths[0])}")
         
     vrt_xml = f'<VRTDataset rasterXSize="{w}" rasterYSize="{h}">\n'
     for i, tiff in enumerate(tiff_paths, 1):
@@ -143,21 +149,20 @@ async def process_zip_upload(file: UploadFile, session_dir: str, session_id: str
             f.write(chunk)
             
     try:
-        zip_ref = zipfile.ZipFile(zip_path, 'r')
+        with zipfile.ZipFile(zip_path, 'r') as zip_ref:
+            if validate_zip_is_grd(zip_ref):
+                metadata = extract_metadata(zip_ref)
+                tiffs = [f.filename for f in zip_ref.filelist if '/measurement/' in f.filename and f.filename.endswith('.tiff')]
+            else:
+                tiffs = [f.filename for f in zip_ref.filelist if f.filename.lower().endswith(('.tif', '.tiff'))]
+                metadata = {
+                    "polarization": ["Unknown"],
+                    "sensor": "Generic Zipped TIFF",
+                    "acquisition_date": "Unknown",
+                    "bounding_box": "Unknown"
+                }
     except zipfile.BadZipFile:
         raise HTTPException(status_code=400, detail="Invalid zip file format.")
-    
-    if validate_zip_is_grd(zip_ref):
-        metadata = extract_metadata(zip_ref)
-        tiffs = [f.filename for f in zip_ref.filelist if '/measurement/' in f.filename and f.filename.endswith('.tiff')]
-    else:
-        tiffs = [f.filename for f in zip_ref.filelist if f.filename.lower().endswith(('.tif', '.tiff'))]
-        metadata = {
-            "polarization": ["Unknown"],
-            "sensor": "Generic Zipped TIFF",
-            "acquisition_date": "Unknown",
-            "bounding_box": "Unknown"
-        }
         
     if not tiffs:
         raise HTTPException(status_code=400, detail="No measurement TIFF files found in the archive.")

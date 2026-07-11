@@ -52,6 +52,12 @@ def process_session_background(session_id: str, vrt_path: str, metadata: dict, w
     if payloads:
         qdrant_store.upsert_vectors(collection_name, payloads)
 
+    # Clean up the temporary session directory to prevent storage leaks
+    import shutil
+    session_dir = os.path.dirname(vrt_path)
+    if os.path.exists(session_dir):
+        shutil.rmtree(session_dir, ignore_errors=True)
+
 @router.post("/{session_id}")
 async def start_processing(session_id: str, background_tasks: BackgroundTasks):
     temp_dir = tempfile.gettempdir()
@@ -72,6 +78,10 @@ async def start_processing(session_id: str, background_tasks: BackgroundTasks):
         with open(metadata_path, 'r') as f:
             metadata = json.load(f)
             
+    status_path = os.path.join(session_dir, "status.json")
+    with open(status_path, "w") as f:
+        json.dump({"estimated_patches": plan.estimated_total_patches}, f)
+            
     background_tasks.add_task(process_session_background, session_id, vrt_path, metadata, width, height)
     
     return {
@@ -83,7 +93,26 @@ async def start_processing(session_id: str, background_tasks: BackgroundTasks):
 async def get_processing_status(session_id: str):
     qdrant_store = QdrantStore.get_instance()
     count = qdrant_store.count_vectors_by_session("sar_patches", session_id)
+    
+    temp_dir = tempfile.gettempdir()
+    session_dir = os.path.join(temp_dir, f"raikou_session_{session_id}")
+    
+    estimated = count
+    status = "completed"
+    
+    status_path = os.path.join(session_dir, "status.json")
+    if os.path.exists(status_path):
+        status = "processing"
+        try:
+            with open(status_path, "r") as f:
+                data = json.load(f)
+                estimated = data.get("estimated_patches", count)
+        except Exception:
+            pass
+            
     return {
         "session_id": session_id,
-        "encoded_patches": count
+        "encoded_patches": count,
+        "estimated_patches": estimated,
+        "status": status
     }

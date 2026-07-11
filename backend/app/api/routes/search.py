@@ -102,14 +102,14 @@ async def rag_chat(request: RagQuery):
     coords = []
     patches_meta = []
     for r in results:
-        payload = r.payload or {}
+        payload = r.get("payload") or {}
         row = payload.get("row_start")
         col = payload.get("col_start")
         if row is not None and col is not None:
             coords.append((row, col))
             patches_meta.append({
-                "id": r.id,
-                "score": r.score,
+                "id": r.get("id"),
+                "score": r.get("score"),
                 "row": row,
                 "col": col,
                 "scene": payload.get("scene_name", "Unknown")
@@ -124,8 +124,15 @@ async def rag_chat(request: RagQuery):
     async def event_generator():
         yield json.dumps({"type": "sources", "data": patches_meta}) + "\n"
 
+        prompt_text = (
+            "You are an expert Synthetic Aperture Radar (SAR) image analyst. "
+            "Analyze the provided SAR image patches and provide a detailed, conversational response answering the following query. "
+            "If you detect relevant objects, provide their bounding box coordinates, but you MUST also explain what you observe in clear, natural language.\n\n"
+            f"User Query: {request.query}"
+        )
+        
         content = [
-            {"type": "text", "text": f"Based on these SAR image patches, answer the user query: {request.query}"}
+            {"type": "text", "text": prompt_text}
         ]
         for b64 in base64_images:
             content.append({

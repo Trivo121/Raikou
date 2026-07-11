@@ -84,7 +84,7 @@ const STEPS = [
 ];
 
 /* ─────────────────────────────────────────────
-   REAL INGESTION CONSTANTS
+   BACKEND CONFIG
 ───────────────────────────────────────────── */
 const BACKEND_URL = process.env.REACT_APP_API_URL || 'http://localhost:8000';
 
@@ -168,12 +168,74 @@ export default function Ingestion() {
     timers.current = [];
   };
 
+  /* ── Auto-Resume on Mount ── */
+  useEffect(() => {
+    const activeSession = localStorage.getItem('raikou_session_id');
+    if (activeSession) {
+      checkAndResumeSession(activeSession);
+    }
+  }, []);
+
+  const checkAndResumeSession = async (sessionId) => {
+    try {
+      const statusRes = await fetch(`${BACKEND_URL}/api/v1/processing/status/${sessionId}`);
+      if (statusRes.ok) {
+        const data = await statusRes.json();
+        if (data.status === 'processing') {
+          setView('processing');
+          setCompletedSteps(prev => Array.from(new Set([...prev, 0, 1])));
+          setCurrentStep(2);
+          pushLog(`Resuming active session: ${sessionId}`);
+          startPolling(sessionId, data.estimated_patches || 1);
+        } else if (data.status === 'completed') {
+          setView('success');
+        }
+      }
+    } catch (e) {
+      console.warn("Failed to check active session:", e);
+    }
+  };
+
+  const startPolling = (sessionId, estimated) => {
+    let encoded = 0;
+    const pollInterval = setInterval(async () => {
+      try {
+        const statusRes = await fetch(`${BACKEND_URL}/api/v1/processing/status/${sessionId}`);
+        if (statusRes.ok) {
+          const statusData = await statusRes.json();
+          encoded = statusData.encoded_patches || 0;
+          
+          const currentProgress = 20 + Math.min(80, Math.round((encoded / estimated) * 80));
+          setProgress(currentProgress);
+          
+          if (encoded > 0) {
+            setCompletedSteps(prev => Array.from(new Set([...prev, 2])));
+            setCurrentStep(3);
+          }
+          
+          pushLog(`Encoding batch... ${encoded} / ${estimated} vectors generated.`);
+          
+          if (statusData.status === 'completed' || encoded >= estimated) {
+            clearInterval(pollInterval);
+            setCompletedSteps(prev => Array.from(new Set([...prev, 3])));
+            setProgress(100);
+            pushLog(`✓ Ingestion complete — ${encoded} patches indexed to Qdrant.`);
+            setTimeout(() => setView('success'), 1000);
+          }
+        }
+      } catch (e) {
+        console.warn("Polling error:", e);
+      }
+    }, 2000);
+    timers.current.push(pollInterval);
+  };
+
   const startIngestion = async () => {
     if (files.length === 0) return;
     clearTimers();
     setView('processing');
     setProgress(0);
-    setCurrentStep(0); // Uploading & Extraction
+    setCurrentStep(0);
     setCompletedSteps([]);
     setLogs([]);
     
@@ -184,7 +246,6 @@ export default function Ingestion() {
     files.forEach(f => formData.append('files', f));
 
     try {
-      // 1. Upload
       const uploadRes = await fetch(`${BACKEND_URL}/api/v1/ingestion/upload`, {
         method: 'POST',
         body: formData,
@@ -196,14 +257,12 @@ export default function Ingestion() {
       
       pushLog(`File uploaded successfully. Session ID: ${sessionId}`);
       setCompletedSteps(prev => [...prev, 0]);
-      setCurrentStep(1); // Signal Conditioning
+      setCurrentStep(1);
       setProgress(10);
       pushLog('Conditioning and Tiling...');
       
-      // Store session ID to local storage so Chat.js can use it
       localStorage.setItem('raikou_session_id', sessionId);
 
-      // 2. Start Processing
       const processRes = await fetch(`${BACKEND_URL}/api/v1/processing/${sessionId}`, {
         method: 'POST',
       });
@@ -213,47 +272,10 @@ export default function Ingestion() {
       
       pushLog(`Processing started. Estimated patches: ${estimated}`);
       setCompletedSteps(prev => [...prev, 1]);
-      setCurrentStep(2); // Patch Tiling
+      setCurrentStep(2);
       setProgress(20);
       
-      // 3. Poll for Progress
-      let encoded = 0;
-      const pollInterval = setInterval(async () => {
-        try {
-          const statusRes = await fetch(`${BACKEND_URL}/api/v1/processing/status/${sessionId}`);
-          if (statusRes.ok) {
-            const statusData = await statusRes.json();
-            encoded = statusData.encoded_patches || 0;
-            
-            const currentProgress = 20 + Math.min(80, Math.round((encoded / estimated) * 80));
-            setProgress(currentProgress);
-            
-            if (encoded > 0 && !completedSteps.includes(2)) {
-              setCompletedSteps(prev => [...prev, 2]);
-              setCurrentStep(3);
-            }
-            
-            pushLog(`Encoding batch... ${encoded} / ${estimated} vectors generated.`);
-            
-            if (encoded >= estimated) {
-              clearInterval(pollInterval);
-              setCompletedSteps(prev => [...prev, 3]);
-              setProgress(100);
-              pushLog(`✓ Ingestion complete — ${encoded} patches indexed to Qdrant.`);
-              setTimeout(() => setView('success'), 1000);
-            }
-          }
-        } catch (e) {
-          console.warn("Polling error:", e);
-        }
-      }, 2000);
-      
-      // Safety timeout for polling
-      timers.current.push(setTimeout(() => {
-        clearInterval(pollInterval);
-        if (progress < 100) simulateError();
-      }, 60000 * 5)); // 5 minute max
-
+      startPolling(sessionId, estimated);
     } catch (e) {
       setErrorDetail(e.message);
       setView('error');
@@ -262,13 +284,18 @@ export default function Ingestion() {
 
   const simulateError = () => {
     clearTimers();
-    setErrorDetail('Connection to Colab runtime lost. Checkpoint saved at patch 2,250 / 4,500.');
+    setErrorDetail('Processing error encountered during vectorization. Please check backend logs.');
     setView('error');
   };
 
   const resumeIngestion = () => {
     setErrorDetail('');
-    startIngestion();
+    const activeSession = localStorage.getItem('raikou_session_id');
+    if (activeSession) {
+      checkAndResumeSession(activeSession);
+    } else {
+      startIngestion();
+    }
   };
 
   const resetUpload = () => {
@@ -295,7 +322,7 @@ export default function Ingestion() {
   }, [view]); // eslint-disable-line
 
   const goWorkspace = () => {
-    window.history.pushState({}, '', '/chat');
+    window.history.pushState({}, '', '/project/new');
     window.dispatchEvent(new PopStateEvent('popstate'));
   };
 
@@ -825,7 +852,7 @@ export default function Ingestion() {
                 style={{ border: `1px solid ${T.border}`, backgroundColor: T.card }}
               >
                 <p style={{ fontSize: '11px', letterSpacing: '0.14em', textTransform: 'uppercase', color: T.textGhost, marginBottom: '14px' }}>
-                  Processing Failed
+                  Checkpoint Status
                 </p>
                 <div className="flex flex-col gap-3.5">
                   {[
@@ -952,7 +979,7 @@ export default function Ingestion() {
 
               {/* Redirect countdown */}
               <p className="mb-6" style={{ fontSize: '13px', color: T.textFaint, textAlign: 'center' }}>
-                Redirecting to Chat Interface in{' '}
+                Redirecting to Project Workspace in{' '}
                 <span style={{ ...monoFont, color: T.accent, fontWeight: 600 }}>{countdown}</span>
                 …
               </p>
@@ -965,7 +992,7 @@ export default function Ingestion() {
                 onMouseEnter={e => (e.currentTarget.style.backgroundColor = '#16a34a')}
                 onMouseLeave={e => (e.currentTarget.style.backgroundColor = T.success)}
               >
-                Go to Chat Interface Now
+                Go to Workspace Now
                 <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round">
                   <path d="M5 12h14M12 5l7 7-7 7" />
                 </svg>

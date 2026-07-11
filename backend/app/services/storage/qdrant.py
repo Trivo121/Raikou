@@ -47,14 +47,14 @@ class QdrantStore:
         Search for nearest neighbors in the given collection.
         Returns a list of dicts with score, id, and payload.
         """
-        search_result = self.client.search(
+        search_result = self.client.query_points(
             collection_name=collection_name,
-            query_vector=query_vector,
+            query=query_vector,
             limit=limit
         )
         
         results = []
-        for hit in search_result:
+        for hit in getattr(search_result, "points", search_result):
             results.append({
                 "id": str(hit.id),
                 "score": hit.score,
