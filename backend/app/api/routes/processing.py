@@ -7,6 +7,7 @@ import rasterio
 from app.services.processing.patch_pipeline import extract_and_preprocess_patches, estimate_patch_count
 from app.services.models.sarclip_encoder import encode_patch_stream, EncodedPatch
 from app.services.storage.qdrant import QdrantStore
+from app.services.session_cache import touch_session
 
 router = APIRouter()
 
@@ -48,15 +49,15 @@ def process_session_background(session_id: str, vrt_path: str, metadata: dict, w
             if len(payloads) >= 64:
                 qdrant_store.upsert_vectors(collection_name, payloads)
                 payloads = []
+                touch_session(session_id)
                 
     if payloads:
         qdrant_store.upsert_vectors(collection_name, payloads)
 
-    # Clean up the temporary session directory to prevent storage leaks
-    import shutil
-    session_dir = os.path.dirname(vrt_path)
-    if os.path.exists(session_dir):
-        shutil.rmtree(session_dir, ignore_errors=True)
+    # Signal completion by removing status.json, but keep the TIFFs/VRT for querying
+    status_path = os.path.join(os.path.dirname(vrt_path), "status.json")
+    if os.path.exists(status_path):
+        os.remove(status_path)
 
 @router.post("/{session_id}")
 async def start_processing(session_id: str, background_tasks: BackgroundTasks):
@@ -91,6 +92,7 @@ async def start_processing(session_id: str, background_tasks: BackgroundTasks):
 
 @router.get("/status/{session_id}")
 async def get_processing_status(session_id: str):
+    touch_session(session_id)
     qdrant_store = QdrantStore.get_instance()
     count = qdrant_store.count_vectors_by_session("sar_patches", session_id)
     

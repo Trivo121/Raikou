@@ -13,6 +13,7 @@ from rasterio.windows import Window
 from app.services.models.sarclip_encoder import SARCLIPEncoder
 from app.services.storage.qdrant import QdrantStore
 from app.services.processing.patch_pipeline import preprocess_patch, PATCH_SIZE, get_base64_patches
+from app.services.session_cache import touch_session
 from openai import AsyncOpenAI
 
 logger = logging.getLogger(__name__)
@@ -55,6 +56,8 @@ async def get_patch_image(session_id: str, row: int, col: int):
     
     if not os.path.exists(vrt_path):
         raise HTTPException(status_code=404, detail="Session or VRT file not found.")
+        
+    touch_session(session_id)
         
     try:
         with rasterio.open(vrt_path) as dataset:
@@ -115,6 +118,7 @@ async def rag_chat(request: RagQuery):
                 "scene": payload.get("scene_name", "Unknown")
             })
 
+    touch_session(request.session_id)
     try:
         base64_images = get_base64_patches(request.session_id, coords)
     except Exception as e:
@@ -122,6 +126,10 @@ async def rag_chat(request: RagQuery):
         base64_images = []
 
     async def event_generator():
+        if coords and not base64_images:
+            yield json.dumps({"type": "error", "data": "Original image data not found. It may have been cleaned up."}) + "\n"
+            return
+            
         yield json.dumps({"type": "sources", "data": patches_meta}) + "\n"
 
         prompt_text = (

@@ -10,9 +10,13 @@ app = FastAPI(
     openapi_url=f"{settings.API_V1_STR}/openapi.json"
 )
 
+import asyncio
+from app.services.session_cache import start_cleanup_loop
+
 @app.on_event("startup")
 async def _startup():
     SARCLIPEncoder.load_singleton()
+    asyncio.create_task(start_cleanup_loop(ttl_hours=2))
 
 # Set all CORS enabled origins
 app.add_middleware(

@@ -132,7 +132,7 @@ def _build_vrt_local(tiff_paths: list[str]) -> str:
     for i, tiff in enumerate(tiff_paths, 1):
         vrt_xml += f'''  <VRTRasterBand dataType="{vrt_dt}" band="{i}">
     <SimpleSource>
-      <SourceFilename relativeToVRT="0">{os.path.basename(tiff)}</SourceFilename>
+      <SourceFilename relativeToVRT="1">{os.path.basename(tiff)}</SourceFilename>
       <SourceBand>1</SourceBand>
       <SrcRect xOff="0" yOff="0" xSize="{w}" ySize="{h}" />
       <DstRect xOff="0" yOff="0" xSize="{w}" ySize="{h}" />
