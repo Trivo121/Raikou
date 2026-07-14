@@ -42,14 +42,26 @@ class QdrantStore:
             points=qdrant_points
         )
 
-    def search_vectors(self, collection_name: str, query_vector: list[float], limit: int = 10) -> list[dict]:
+    def search_vectors(self, collection_name: str, query_vector: list[float], limit: int = 10, session_id: str = None) -> list[dict]:
         """
         Search for nearest neighbors in the given collection.
         Returns a list of dicts with score, id, and payload.
         """
+        query_filter = None
+        if session_id:
+            query_filter = Filter(
+                must=[
+                    FieldCondition(
+                        key="session_id",
+                        match=MatchValue(value=session_id)
+                    )
+                ]
+            )
+
         search_result = self.client.query_points(
             collection_name=collection_name,
             query=query_vector,
+            query_filter=query_filter,
             limit=limit
         )
         

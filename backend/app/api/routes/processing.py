@@ -4,14 +4,82 @@ import json
 from fastapi import APIRouter, HTTPException, BackgroundTasks
 import rasterio
 
-from app.services.processing.patch_pipeline import extract_and_preprocess_patches, estimate_patch_count
+from app.services.processing.patch_pipeline import extract_and_preprocess_patches, estimate_patch_count, generate_overview
 from app.services.models.sarclip_encoder import encode_patch_stream, EncodedPatch
 from app.services.storage.qdrant import QdrantStore
 from app.services.session_cache import touch_session
 
+import logging
+import requests
+import base64
+
 router = APIRouter()
+logger = logging.getLogger(__name__)
+
+def generate_cached_caption_sync(session_id: str):
+    """
+    Generates a generic caption for the scene overview(s) using a synchronous HTTP call to vLLM.
+    Fails silently so it doesn't block ingestion.
+    """
+    temp_dir = tempfile.gettempdir()
+    session_dir = os.path.join(temp_dir, f"raikou_session_{session_id}")
+    metadata_path = os.path.join(session_dir, "metadata.json")
+    
+    try:
+        if not os.path.exists(metadata_path):
+            return
+            
+        with open(metadata_path, 'r') as f:
+            metadata = json.load(f)
+            
+        overviews = metadata.get("overviews", {})
+        if not overviews:
+            return
+            
+        b64_images = []
+        for filename in overviews.keys():
+            img_path = os.path.join(session_dir, filename)
+            if os.path.exists(img_path):
+                with open(img_path, "rb") as img_file:
+                    b64_str = base64.b64encode(img_file.read()).decode('utf-8')
+                    b64_images.append(b64_str)
+                    
+        if not b64_images:
+            return
+            
+        prompt_text = "Describe the broad structure, geographic features, and overall context of this SAR scene."
+        content = [{"type": "text", "text": prompt_text}]
+        for b64 in b64_images:
+            content.append({
+                "type": "image_url",
+                "image_url": {"url": f"data:image/jpeg;base64,{b64}"}
+            })
+            
+        payload = {
+            "model": "/models/SARChat-Phi-3.5-vision-instruct",
+            "messages": [{"role": "user", "content": content}],
+            "max_tokens": 512,
+            "temperature": 0.2
+        }
+        
+        resp = requests.post("http://localhost:8001/v1/chat/completions", json=payload, timeout=30)
+        resp.raise_for_status()
+        result = resp.json()
+        
+        caption = result.get("choices", [])[0].get("message", {}).get("content", "")
+        if caption:
+            metadata["cached_caption"] = caption
+            with open(metadata_path, 'w') as f:
+                json.dump(metadata, f, indent=2)
+            
+    except Exception as e:
+        logger.error(f"Failed to generate cached caption for session {session_id}: {e}")
 
 def process_session_background(session_id: str, vrt_path: str, metadata: dict, width: int, height: int):
+    # Phase 1: Generate scene overviews and optional caption BEFORE patch encoding
+    generate_overview(vrt_path, session_id)
+    generate_cached_caption_sync(session_id)
+    
     qdrant_store = QdrantStore.get_instance()
     collection_name = "sar_patches"
     qdrant_store.initialize_collection(collection_name)
@@ -78,6 +146,11 @@ async def start_processing(session_id: str, background_tasks: BackgroundTasks):
     if os.path.exists(metadata_path):
         with open(metadata_path, 'r') as f:
             metadata = json.load(f)
+            
+    metadata["scene_width"] = width
+    metadata["scene_height"] = height
+    with open(metadata_path, 'w') as f:
+        json.dump(metadata, f, indent=2)
             
     status_path = os.path.join(session_dir, "status.json")
     with open(status_path, "w") as f:

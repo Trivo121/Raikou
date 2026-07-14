@@ -1,6 +1,6 @@
 import React, { useState, useEffect } from 'react';
-import { 
-  Search, Grid, Archive, Plus, Users, ChevronDown 
+import {
+  Search, Grid, Archive, Plus, Users, ChevronDown
 } from 'lucide-react';
 import { getSupabase } from '../App';
 
@@ -13,7 +13,7 @@ export default function Dashboard() {
     async function fetchProfile() {
       const supabase = getSupabase();
       if (!supabase) return;
-      
+
       const { data: { session } } = await supabase.auth.getSession();
       if (!session) {
         window.history.pushState({}, '', '/login');
@@ -28,7 +28,7 @@ export default function Dashboard() {
           .select('*')
           .eq('id', session.user.id)
           .single();
-          
+
         if (data && !error) {
           setProfile(data);
         } else {
@@ -63,6 +63,11 @@ export default function Dashboard() {
     window.dispatchEvent(new PopStateEvent('popstate'));
   };
 
+  const goToProject = (projectId) => {
+    window.history.pushState({}, '', `/project/${projectId}`);
+    window.dispatchEvent(new PopStateEvent('popstate'));
+  };
+
   // Redesigned navigation items
   const navItems = [
     { name: 'All', icon: Grid },
@@ -82,10 +87,10 @@ export default function Dashboard() {
   return (
     // Outer Container: Geometric Inter look, ultra-dark tone background, light silver-gray text
     <div className="min-h-screen bg-[#09090b] text-[#c5c5c9] font-['Inter'] text-[13px] flex selection:bg-[#0088ff]/30">
-      
+
       {/* Sidebar: Clean, very dark, borders kept thin and subtle */}
       <aside className="w-60 shrink-0 border-r border-[#1c1c22] bg-[#0c0c0e] p-3 flex flex-col h-screen select-none">
-        
+
         {/* Workspace Dropdown Selector */}
         <div className="flex items-center justify-between p-1.5 mb-2.5 hover:bg-[#1a1a1f] rounded-lg cursor-pointer transition-colors duration-150 group">
           <div className="flex items-center gap-2">
@@ -106,9 +111,9 @@ export default function Dashboard() {
         {/* Custom Muted Search Field */}
         <div className="relative mb-4">
           <Search size={13} className="absolute left-2.5 top-1/2 -translate-y-1/2 text-zinc-500" />
-          <input 
-            type="text" 
-            placeholder="Search..." 
+          <input
+            type="text"
+            placeholder="Search..."
             className="w-full bg-[#18181b] border border-[#242429] text-white placeholder:text-zinc-500 rounded-lg pl-8 pr-3 py-1.5 outline-none text-[12px] focus:border-zinc-700 transition-colors"
           />
         </div>
@@ -128,8 +133,8 @@ export default function Dashboard() {
                   onClick={() => setActiveTab(item.name)}
                   className={`
                     flex items-center gap-2.5 px-2.5 py-1.5 rounded-lg text-left transition-colors duration-150
-                    ${isActive 
-                      ? 'bg-[#1e1e24] text-white font-medium' 
+                    ${isActive
+                      ? 'bg-[#1e1e24] text-white font-medium'
                       : 'text-zinc-400 hover:text-zinc-200 hover:bg-[#15151a]'
                     }
                   `}
@@ -139,7 +144,7 @@ export default function Dashboard() {
                 </button>
               );
             })}
-            
+
             {/* New Folder Action Button */}
             <button className="flex items-center gap-2.5 px-2.5 py-1.5 rounded-lg text-left text-zinc-500 hover:text-zinc-300 hover:bg-[#15151a] transition-colors duration-150">
               <Plus size={14} className="text-zinc-500" />
@@ -154,12 +159,12 @@ export default function Dashboard() {
             <Users size={14} className="text-zinc-500" />
             <span>Invite your team</span>
           </button>
-          <button 
+          <button
             onClick={handleCopyLink}
             className={`
               text-[11px] font-medium px-2.5 py-1.5 rounded-lg border transition-all active:scale-[0.96]
-              ${copySuccess 
-                ? 'bg-emerald-950/40 border-emerald-800 text-emerald-400' 
+              ${copySuccess
+                ? 'bg-emerald-950/40 border-emerald-800 text-emerald-400'
                 : 'bg-[#18181c] border-[#25252b] text-zinc-200 hover:bg-[#202026] hover:text-white'
               }
             `}
@@ -172,12 +177,12 @@ export default function Dashboard() {
 
       {/* Main Panel Canvas Area */}
       <main className="flex-1 p-8 overflow-y-auto h-screen flex flex-col">
-        
+
         {/* Header toolbar matching reference */}
         <header className="flex items-center justify-between mb-8 select-none">
           <h1 className="text-xl text-white font-semibold tracking-tight">{activeTab}</h1>
           <div className="flex items-center gap-2">
-            
+
             {/* Sort/Filter Selection Menu */}
             <button className="flex items-center gap-1.5 bg-[#18181b] border border-[#242429] text-zinc-300 px-3 py-1.5 rounded-lg hover:bg-[#202025] hover:text-white transition-colors text-[12px] font-medium">
               <span>Last viewed by me</span>
@@ -200,16 +205,17 @@ export default function Dashboard() {
         {/* Project Vertical / Portrait grid */}
         <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 lg:grid-cols-4 xl:grid-cols-5 gap-x-6 gap-y-8">
           {sarProjects.map((project) => (
-            <div 
-              key={project.id} 
+            <div
+              key={project.id}
+              onClick={() => goToProject(project.id)}
               className="group flex flex-col cursor-pointer"
             >
               {/* Portrait Preview Box: Aspect Ratio 3:4 */}
               <div className="aspect-[3/4] w-full bg-[#131316] rounded-xl border border-[#202025] group-hover:border-[#383840] hover:bg-[#16161a] transition-all duration-200 flex items-center justify-center relative overflow-hidden mb-3 shadow-sm">
-                
+
                 {/* Simulated Grid Texture/Dotted pattern */}
                 <div className="absolute inset-0 opacity-2 bg-[radial-gradient(#ffffff_1px,transparent_1px)] [background-size:16px_16px]"></div>
-                
+
                 {/* SVG Framer Logo centered in the vertical card */}
                 <svg width="24" height="36" viewBox="0 0 20 30" fill="none" xmlns="http://www.w3.org/2000/svg" className="text-zinc-700 group-hover:text-zinc-400 transition-colors duration-200">
                   <path d="M0 0H20V10H0V0Z" fill="currentColor" fillOpacity="0.25" />
@@ -219,7 +225,7 @@ export default function Dashboard() {
                   <path d="M0 10H20L10 20H0V10Z" stroke="currentColor" strokeWidth="1.2" strokeLinejoin="round" />
                   <path d="M0 20L10 30V20H0Z" stroke="currentColor" strokeWidth="1.2" strokeLinejoin="round" />
                 </svg>
-                
+
               </div>
 
               {/* Card Title, Relative viewing time, and Badge Pill */}
@@ -232,7 +238,7 @@ export default function Dashboard() {
                     {project.subtext}
                   </span>
                 </div>
-                
+
                 {/* Capsule Status Badge */}
                 <span className="shrink-0 bg-[#202025]/60 border border-[#2b2b35]/65 text-[9px] font-bold text-zinc-400 px-1.5 py-0.5 rounded uppercase tracking-wider scale-95 origin-right">
                   {project.badge}

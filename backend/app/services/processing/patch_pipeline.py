@@ -8,9 +8,11 @@ import tempfile
 import io
 from PIL import Image
 
+import json
 import numpy as np
 import rasterio
 from rasterio.windows import Window
+from rasterio.enums import Resampling
 
 logger = logging.getLogger("patch_pipeline")
 
@@ -25,6 +27,10 @@ NODATA_DISCARD_FRACTION = 0.40   # >40% zero pixels -> discard.
 # Config — Feature 2 dB clipping range.
 DB_FLOOR = -25.0
 DB_CEILING = 5.0
+
+# Config - Phase 1 Scene Overview
+OVERVIEW_TARGET_SIZE = 1024
+GRID_SPLIT_THRESHOLD = 8192
 
 
 # --------------------------------------------------------------------------
@@ -219,10 +225,82 @@ def estimate_patch_count(width: int, height: int) -> PatchPlan:
 # Multi-Modal Orchestrator Helpers
 # --------------------------------------------------------------------------
 
-def get_base64_patches(session_id: str, coordinates: list[tuple[int, int]]) -> list[str]:
+def generate_overview(vrt_path: str, session_id: str):
+    """
+    Generates token-bounded low-resolution overviews for the entire scene using 
+    decimated reads, preserving the exact same dB conversion logic as patches.
+    """
+    session_dir = os.path.dirname(vrt_path)
+    metadata_path = os.path.join(session_dir, "metadata.json")
+    
+    try:
+        with rasterio.open(vrt_path) as dataset:
+            width, height = dataset.width, dataset.height
+            bands = dataset.count
+            
+            use_grid = width > GRID_SPLIT_THRESHOLD or height > GRID_SPLIT_THRESHOLD
+            
+            overviews = {}
+            
+            if use_grid:
+                half_w, half_h = width // 2, height // 2
+                sections = [
+                    ("NW", Window(0, 0, half_w, half_h)),
+                    ("NE", Window(half_w, 0, width - half_w, half_h)),
+                    ("SW", Window(0, half_h, half_w, height - half_h)),
+                    ("SE", Window(half_w, half_h, width - half_w, height - half_h))
+                ]
+            else:
+                sections = [("single", Window(0, 0, width, height))]
+                
+            for label, window in sections:
+                # Decimated read: request subset, but force output to fixed target size.
+                out_shape = (bands, OVERVIEW_TARGET_SIZE, OVERVIEW_TARGET_SIZE)
+                
+                raw_overview = dataset.read(
+                    window=window,
+                    out_shape=out_shape,
+                    resampling=Resampling.average
+                )
+                
+                # Use the exact same dB mapping as micro-patches
+                rgb_overview = _build_channels(raw_patch=raw_overview)
+                
+                filename = f"overview_{label}.jpg"
+                out_path = os.path.join(session_dir, filename)
+                
+                image = Image.fromarray(rgb_overview)
+                image.save(out_path, format="JPEG")
+                
+                overviews[filename] = {
+                    "type": "grid" if use_grid else "single",
+                    "label": label,
+                    "row_range": [window.row_off, window.row_off + window.height],
+                    "col_range": [window.col_off, window.col_off + window.width]
+                }
+                
+        # Update metadata.json safely
+        metadata = {}
+        if os.path.exists(metadata_path):
+            with open(metadata_path, 'r') as f:
+                try:
+                    metadata = json.load(f)
+                except Exception:
+                    pass
+            
+        metadata["overviews"] = overviews
+        
+        with open(metadata_path, 'w') as f:
+            json.dump(metadata, f, indent=2)
+            
+    except Exception as e:
+        logger.error(f"Failed to generate scene overview: {e}", exc_info=True)
+
+
+def get_base64_patches(session_id: str, coordinates: list[tuple[int, int]]) -> list[dict]:
     """
     Takes top-K patch coordinates (row, col), reads them from stacked.vrt, and returns
-    base64 encoded JPEG strings in memory for the VLM.
+    a list of dicts with row, col, and the base64 encoded JPEG string.
     """
     temp_dir = tempfile.gettempdir()
     session_dir = os.path.join(temp_dir, f"raikou_session_{session_id}")
@@ -232,21 +310,54 @@ def get_base64_patches(session_id: str, coordinates: list[tuple[int, int]]) -> l
         logger.error(f"VRT file not found: {vrt_path}")
         return []
 
-    base64_images = []
+    extracted_patches = []
     
     try:
         with rasterio.open(vrt_path) as dataset:
             for row, col in coordinates:
-                window = Window(col, row, PATCH_SIZE, PATCH_SIZE)
-                raw_patch = dataset.read(window=window)
-                processed = preprocess_patch(raw_patch)
-                if processed is not None:
-                    image = Image.fromarray(processed)
-                    buf = io.BytesIO()
-                    image.save(buf, format="JPEG")
-                    b64_str = base64.b64encode(buf.getvalue()).decode('utf-8')
-                    base64_images.append(b64_str)
+                try:
+                    window = Window(col, row, PATCH_SIZE, PATCH_SIZE)
+                    raw_patch = dataset.read(window=window)
+                    processed = preprocess_patch(raw_patch)
+                    if processed is not None:
+                        image = Image.fromarray(processed)
+                        buf = io.BytesIO()
+                        image.save(buf, format="JPEG")
+                        b64_str = base64.b64encode(buf.getvalue()).decode('utf-8')
+                        extracted_patches.append({
+                            "row": row,
+                            "col": col,
+                            "base64": b64_str
+                        })
+                except Exception as e:
+                    logger.error(f"Failed to extract patch at row {row}, col {col}: {e}")
     except Exception as e:
-        logger.error(f"Failed to extract base64 patches: {e}")
+        logger.error(f"Failed to open VRT for patch extraction: {e}")
         
-    return base64_images
+    return extracted_patches
+
+
+def get_spatial_label(row_start: int, col_start: int, patch_size: int, scene_width: int, scene_height: int) -> str:
+    """
+    Computes a plain-language spatial label for a given patch coordinate.
+    Mirrors the grid-split logic of generate_overview exactly.
+    """
+    center_row = row_start + patch_size // 2
+    center_col = col_start + patch_size // 2
+    
+    use_grid = scene_width > GRID_SPLIT_THRESHOLD or scene_height > GRID_SPLIT_THRESHOLD
+    
+    if use_grid:
+        half_w, half_h = scene_width // 2, scene_height // 2
+        if center_row < half_h and center_col < half_w:
+            quadrant = "northwest"
+        elif center_row < half_h and center_col >= half_w:
+            quadrant = "northeast"
+        elif center_row >= half_h and center_col < half_w:
+            quadrant = "southwest"
+        else:
+            quadrant = "southeast"
+        
+        return f"{quadrant} quadrant, rows {row_start}-{row_start+patch_size}, columns {col_start}-{col_start+patch_size}"
+    else:
+        return f"full scene, rows {row_start}-{row_start+patch_size}, columns {col_start}-{col_start+patch_size}"
