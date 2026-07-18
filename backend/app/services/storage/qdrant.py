@@ -1,5 +1,5 @@
 from qdrant_client import QdrantClient
-from qdrant_client.models import Distance, VectorParams, PointStruct, Filter, FieldCondition, MatchValue
+from qdrant_client.models import Distance, VectorParams, PointStruct, Filter, FieldCondition, MatchValue, PayloadSchemaType
 from app.core.config import settings
 import uuid
 
@@ -24,7 +24,21 @@ class QdrantStore:
                 collection_name=collection_name,
                 vectors_config=VectorParams(size=vector_size, distance=Distance.COSINE)
             )
+        self._ensure_payload_indexes(collection_name)
 
+
+    def _ensure_payload_indexes(self, collection_name: str):
+        try:
+            self.client.create_payload_index(
+                collection_name=collection_name,
+                field_name="session_id",
+                field_schema=PayloadSchemaType.KEYWORD,
+                wait=True,
+            )
+        except Exception as e:
+            message = str(e).lower()
+            if "already exists" not in message and "already has" not in message:
+                raise
     def upsert_vectors(self, collection_name: str, points: list[dict]):
         """
         points is a list of dicts: {"id": str, "vector": list[float], "payload": dict}
@@ -93,3 +107,19 @@ class QdrantStore:
             return count_result.count
         except Exception:
             return 0
+
+    def delete_vectors_by_session(self, collection_name: str, session_id: str):
+        if not self.client.collection_exists(collection_name=collection_name):
+            return
+        self.client.delete(
+            collection_name=collection_name,
+            points_selector=Filter(
+                must=[
+                    FieldCondition(
+                        key="session_id",
+                        match=MatchValue(value=session_id)
+                    )
+                ]
+            )
+        )
+

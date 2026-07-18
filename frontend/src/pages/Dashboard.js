@@ -59,12 +59,38 @@ export default function Dashboard() {
   };
 
   const handleNewProject = () => {
+    localStorage.removeItem('raikou_session_id');
     window.history.pushState({}, '', '/ingestion');
     window.dispatchEvent(new PopStateEvent('popstate'));
   };
 
-  const goToProject = (projectId) => {
-    window.history.pushState({}, '', `/project/${projectId}`);
+  const [conversations, setConversations] = useState([]);
+
+  useEffect(() => {
+    async function fetchConversations() {
+      const supabase = getSupabase();
+      if (!supabase) return;
+      const { data: { session } } = await supabase.auth.getSession();
+      if (!session) return;
+      const { data, error } = await supabase
+        .from('conversations')
+        .select('*')
+        .eq('user_id', session.user.id)
+        .order('updated_at', { ascending: false });
+      if (data && !error) {
+        setConversations(data.map(conv => ({
+          id: conv.id,
+          title: conv.title || 'New Chat',
+          subtext: new Date(conv.updated_at).toLocaleDateString(),
+          badge: 'CHAT'
+        })));
+      }
+    }
+    fetchConversations();
+  }, []);
+
+  const goToProject = (id) => {
+    window.history.pushState({}, '', `/project/${id}`);
     window.dispatchEvent(new PopStateEvent('popstate'));
   };
 
@@ -72,16 +98,6 @@ export default function Dashboard() {
   const navItems = [
     { name: 'All', icon: Grid },
     { name: 'Archive', icon: Archive },
-  ];
-
-  // Project List matching reference
-  const sarProjects = [
-    { id: 'proj-1', title: 'Primary Anything', subtext: 'Viewed 19h ago', badge: 'FREE' },
-    { id: 'proj-2', title: 'S1A_IW_Rotterdam', subtext: 'Viewed 1d ago', badge: 'FREE' },
-    { id: 'proj-3', title: 'South_China_Sea_Detection', subtext: 'Viewed 2d ago', badge: 'FREE' },
-    { id: 'proj-4', title: 'Amazon_Deforestation_SAR', subtext: 'Viewed 5d ago', badge: 'FREE' },
-    { id: 'proj-5', title: 'Suez_Transit_RAG', subtext: 'Viewed 1w ago', badge: 'FREE' },
-    { id: 'proj-6', title: 'Strait_of_Hormuz_Scan', subtext: 'Viewed 2w ago', badge: 'FREE' },
   ];
 
   return (
@@ -204,7 +220,7 @@ export default function Dashboard() {
 
         {/* Project Vertical / Portrait grid */}
         <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 lg:grid-cols-4 xl:grid-cols-5 gap-x-6 gap-y-8">
-          {sarProjects.map((project) => (
+          {conversations.map((project) => (
             <div
               key={project.id}
               onClick={() => goToProject(project.id)}

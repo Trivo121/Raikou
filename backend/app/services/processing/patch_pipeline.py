@@ -4,9 +4,9 @@ from dataclasses import dataclass, field
 from typing import Iterator, Optional
 import base64
 import os
-import tempfile
 import io
 from PIL import Image
+from app.services.session_cache import get_session_dir
 
 import json
 import numpy as np
@@ -302,8 +302,7 @@ def get_base64_patches(session_id: str, coordinates: list[tuple[int, int]]) -> l
     Takes top-K patch coordinates (row, col), reads them from stacked.vrt, and returns
     a list of dicts with row, col, and the base64 encoded JPEG string.
     """
-    temp_dir = tempfile.gettempdir()
-    session_dir = os.path.join(temp_dir, f"raikou_session_{session_id}")
+    session_dir = get_session_dir(session_id)
     vrt_path = os.path.join(session_dir, "stacked.vrt")
     
     if not os.path.exists(vrt_path):
@@ -361,3 +360,5 @@ def get_spatial_label(row_start: int, col_start: int, patch_size: int, scene_wid
         return f"{quadrant} quadrant, rows {row_start}-{row_start+patch_size}, columns {col_start}-{col_start+patch_size}"
     else:
         return f"full scene, rows {row_start}-{row_start+patch_size}, columns {col_start}-{col_start+patch_size}"
+
+

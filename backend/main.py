@@ -1,4 +1,7 @@
+import os
 import uvicorn
+from dotenv import load_dotenv
+load_dotenv()
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from app.core.config import settings
@@ -16,7 +19,8 @@ from app.services.session_cache import start_cleanup_loop
 @app.on_event("startup")
 async def _startup():
     SARCLIPEncoder.load_singleton()
-    asyncio.create_task(start_cleanup_loop(ttl_hours=2))
+    ttl_hours = int(os.environ.get("RAIKOU_SESSION_TTL_HOURS", "168"))
+    asyncio.create_task(start_cleanup_loop(ttl_hours=ttl_hours))
 
 # Set all CORS enabled origins
 app.add_middleware(
@@ -38,3 +42,5 @@ def root():
 
 if __name__ == "__main__":
     uvicorn.run("main:app", host="0.0.0.0", port=8000, reload=True)
+
+

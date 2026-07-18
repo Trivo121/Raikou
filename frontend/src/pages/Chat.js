@@ -15,7 +15,7 @@ export default function Chat() {
     const [retrievedSources, setRetrievedSources] = useState([]);
 
     useEffect(() => {
-        async function fetchProfile() {
+        async function fetchProfileAndHistory() {
             const supabase = getSupabase();
             if (!supabase) return;
 
@@ -35,9 +35,29 @@ export default function Chat() {
                         avatar_url: session.user.user_metadata?.avatar_url
                     });
                 }
+                
+                // Fetch history if ?id= present
+                const params = new URLSearchParams(window.location.search);
+                const convId = params.get('id');
+                if (convId) {
+                    const { data: messagesData } = await supabase
+                        .from('messages')
+                        .select('*')
+                        .eq('conversation_id', convId)
+                        .order('created_at', { ascending: true });
+                        
+                    if (messagesData) {
+                        setChatHistory(messagesData.map(m => ({
+                            id: m.id,
+                            role: m.role,
+                            content: m.content,
+                            sources: [] // We don't restore images/sources per user request
+                        })));
+                    }
+                }
             }
         }
-        fetchProfile();
+        fetchProfileAndHistory();
     }, []);
 
     const handleSendMessage = async (e) => {
@@ -54,17 +74,28 @@ export default function Chat() {
         setChatHistory(prev => [...prev, { id: assistantMsgId, role: 'assistant', content: '', sources: [] }]);
 
         try {
+            const supabase = getSupabase();
+            const { data: { session } } = await supabase.auth.getSession();
+            const token = session?.access_token;
+            if (!token) throw new Error("No active session");
+
             const sessionId = localStorage.getItem('raikou_session_id') || 'default_session';
+            const params = new URLSearchParams(window.location.search);
+            const convId = params.get('id');
+
             const BACKEND_URL = process.env.REACT_APP_API_URL || 'http://localhost:8000';
             const response = await fetch(`${BACKEND_URL}/api/v1/search/rag/chat`, {
                 method: 'POST',
                 headers: {
-                    'Content-Type': 'application/json'
+                    'Content-Type': 'application/json',
+                    'Authorization': `Bearer ${token}`
                 },
                 body: JSON.stringify({
                     query,
                     session_id: sessionId,
-                    limit: 3
+                    limit: 3,
+                    history: chatHistory.map(msg => ({ role: msg.role, content: msg.content })),
+                    conversation_id: convId || undefined
                 })
             });
 
@@ -85,7 +116,11 @@ export default function Chat() {
                     try {
                         const data = JSON.parse(line);
 
-                        if (data.type === 'sources') {
+                        if (data.type === 'conversation_id') {
+                            const newUrl = new URL(window.location.href);
+                            newUrl.searchParams.set('id', data.data);
+                            window.history.replaceState({}, '', newUrl);
+                        } else if (data.type === 'sources') {
                             const newSources = data.data.map((s, i) => ({
                                 id: `patch_${s.id}`,
                                 title: `Match ${i + 1}`,

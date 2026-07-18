@@ -8,7 +8,7 @@ sudo docker run -d --gpus all \
   --model /models/SARChat-Phi-3.5-vision-instruct \
   --trust-remote-code \
   --gpu-memory-utilization 0.85 \
-  --max-model-len 8192 \
-  --max-num-seqs 2 \
+  --max-model-len 9216 \
+  --max-num-seqs 3 \
   --mm-processor-kwargs '{"num_crops": 4}' \
   --limit-mm-per-prompt '{"image": 9}'

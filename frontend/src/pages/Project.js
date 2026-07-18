@@ -250,8 +250,10 @@ function PatchThumb({ confidence }) {
    COMPONENT
 ───────────────────────────────────────────── */
 export default function Project() {
-  const project = getProject();
-  const welcome = useRef(buildWelcome(project)).current;
+  const initialProject = getProject();
+  const [projectData, setProjectData] = useState(initialProject);
+  const [activeSessionId, setActiveSessionId] = useState(null);
+  const welcome = useRef(buildWelcome(projectData)).current;
 
   const [messages, setMessages] = useState(() => ([
     { id: 'm0', role: 'assistant', content: welcome.text, sources: welcome.sources, streaming: false },
@@ -271,15 +273,41 @@ export default function Project() {
   const idCounter = useRef(1);
   const nextId = () => `m${idCounter.current++}`;
 
-  /* ── Auth guard (same pattern as Dashboard.js) ── */
+  /* ── Auth & Real Project Loading ── */
   useEffect(() => {
-    async function checkAuth() {
+    async function initProject() {
       const supabase = getSupabase();
       if (!supabase) return;
       const { data: { session } } = await supabase.auth.getSession();
-      if (!session) navigate('/login');
+      if (!session) {
+        navigate('/login');
+        return;
+      }
+
+      const parts = window.location.pathname.split('/').filter(Boolean);
+      const id = parts[1];
+      if (!id || id === 'new') return;
+
+      // 1. Fetch conversation for title and session_id
+      const { data: convData } = await supabase
+        .from('conversations')
+        .select('*')
+        .eq('id', id)
+        .single();
+        
+      if (convData) {
+        setProjectData(prev => ({
+          ...prev,
+          title: convData.title,
+          id: convData.id
+        }));
+        
+        if (convData.session_id) {
+          setActiveSessionId(convData.session_id);
+        }
+      }
     }
-    checkAuth();
+    initProject();
   }, []);
 
   /* ── Auto-scroll ── */
@@ -332,12 +360,23 @@ export default function Project() {
     setMessages(prev => [...prev, { id: assistantId, role: 'assistant', content: '', sources: [], streaming: true }]);
 
     try {
-        const sessionId = localStorage.getItem('raikou_session_id') || 'default_session';
+        const sessionId = activeSessionId || localStorage.getItem('raikou_session_id') || 'default_session';
         const BACKEND_URL = process.env.REACT_APP_API_URL || 'http://localhost:8000';
+        
+        const supabase = getSupabase();
+        let token = '';
+        if (supabase) {
+            const { data: { session } } = await supabase.auth.getSession();
+            if (session) {
+                token = session.access_token;
+            }
+        }
+
         const response = await fetch(`${BACKEND_URL}/api/v1/search/rag/chat`, {
             method: 'POST',
             headers: {
-                'Content-Type': 'application/json'
+                'Content-Type': 'application/json',
+                ...(token ? { 'Authorization': `Bearer ${token}` } : {})
             },
             body: JSON.stringify({
                 query: text,
@@ -431,7 +470,7 @@ export default function Project() {
     });
   };
 
-  const filteredFiles = project.files.filter(f => f.name.toLowerCase().includes(fileFilter.toLowerCase()));
+  const filteredFiles = projectData.files.filter(f => f.name.toLowerCase().includes(fileFilter.toLowerCase()));
   const hasStreamingMessage = messages.some(m => m.streaming);
 
   return (
@@ -458,10 +497,10 @@ export default function Project() {
               <div className="w-6 h-6 rounded bg-[#0088ff]/15 border border-[#0088ff]/25 flex items-center justify-center shrink-0">
                 <Radar size={12} className="text-[#5eb6ff]" />
               </div>
-              <span className="text-white font-medium text-[12px] truncate">{project.title}</span>
+              <span className="text-white font-medium text-[12px] truncate">{projectData.title}</span>
             </div>
             <p className="text-zinc-500 text-[11px] leading-snug">
-              {project.sceneCount} scenes · {project.patchCount.toLocaleString()} patches
+              {projectData.sceneCount} scenes · {projectData.patchCount.toLocaleString()} patches
             </p>
           </div>
 
@@ -539,7 +578,7 @@ export default function Project() {
               >
                 <ArrowLeft size={16} />
               </button>
-              <h1 className="text-white font-semibold text-[14px] truncate">{project.title}</h1>
+              <h1 className="text-white font-semibold text-[14px] truncate">{projectData.title}</h1>
               <span className="shrink-0 flex items-center gap-1.5 bg-[#0f2a1c] border border-[#1c4a30] text-emerald-400 text-[10px] font-semibold px-2 py-0.5 rounded-full uppercase tracking-wider">
                 <span className="w-1.5 h-1.5 rounded-full bg-emerald-400" />
                 Indexed
@@ -613,7 +652,7 @@ export default function Project() {
 
                       {msg.id === 'm0' && messages.length === 1 && (
                         <div className="grid grid-cols-1 sm:grid-cols-2 gap-2 mt-4 max-w-[560px]">
-                          {project.prompts.map((p) => (
+                          {projectData.prompts.map((p) => (
                             <button
                               key={p}
                               onClick={() => handleSend(p)}
@@ -637,7 +676,7 @@ export default function Project() {
                     <span className="text-[12px] text-zinc-500">
                       {thinkingStage === 0
                         ? 'Querying vector index…'
-                        : `Re-ranking ${project.patchCount.toLocaleString()} candidate patches…`}
+                        : `Re-ranking ${projectData.patchCount.toLocaleString()} candidate patches…`}
                     </span>
                   </div>
                 )}
@@ -661,7 +700,7 @@ export default function Project() {
                     value={input}
                     onChange={e => { setInput(e.target.value); autoResize(); }}
                     onKeyDown={onKeyDown}
-                    placeholder={`Ask about ${project.title}…`}
+                    placeholder={`Ask about ${projectData.title}…`}
                     disabled={isThinking}
                     className="flex-1 bg-transparent outline-none resize-none text-[13px] text-white placeholder:text-zinc-600 py-1.5 max-h-40 disabled:opacity-50"
                   />
@@ -693,19 +732,19 @@ export default function Project() {
                     Live
                   </span>
                 </div>
-                <p className="text-white text-[12px] font-mono mb-3 truncate">{project.indexName}</p>
+                <p className="text-white text-[12px] font-mono mb-3 truncate">{projectData.indexName}</p>
                 <div className="grid grid-cols-2 gap-3">
                   <div>
                     <p className="text-[10px] text-zinc-600 mb-0.5">Scenes</p>
-                    <p className="text-[13px] font-mono text-zinc-200 font-semibold">{project.sceneCount}</p>
+                    <p className="text-[13px] font-mono text-zinc-200 font-semibold">{projectData.sceneCount}</p>
                   </div>
                   <div>
                     <p className="text-[10px] text-zinc-600 mb-0.5">Patches</p>
-                    <p className="text-[13px] font-mono text-zinc-200 font-semibold">{project.patchCount.toLocaleString()}</p>
+                    <p className="text-[13px] font-mono text-zinc-200 font-semibold">{projectData.patchCount.toLocaleString()}</p>
                   </div>
                   <div>
                     <p className="text-[10px] text-zinc-600 mb-0.5">Vectors</p>
-                    <p className="text-[13px] font-mono text-zinc-200 font-semibold">{project.vectorCount.toLocaleString()}</p>
+                    <p className="text-[13px] font-mono text-zinc-200 font-semibold">{projectData.vectorCount.toLocaleString()}</p>
                   </div>
                   <div>
                     <p className="text-[10px] text-zinc-600 mb-0.5">Dimensions</p>

@@ -1,0 +1,15 @@
+[Unit]
+Description=SARChat Phi 3.5 Vision vLLM server
+After=docker.service network-online.target
+Requires=docker.service
+
+[Service]
+Type=simple
+Restart=always
+RestartSec=10
+ExecStartPre=-/usr/bin/docker rm -f sarchat-vllm
+ExecStart=/usr/bin/docker run --rm --name sarchat-vllm --gpus all --restart=no -v /home/ubuntu/backend/models:/models -p 127.0.0.1:8001:8000 vllm/vllm-openai:latest --model /models/SARChat-Phi-3.5-vision-instruct --trust-remote-code --gpu-memory-utilization 0.85 --max-model-len 9216 --max-num-seqs 3 --mm-processor-kwargs {"num_crops":4} --limit-mm-per-prompt {"image":9}
+ExecStop=/usr/bin/docker stop -t 30 sarchat-vllm
+
+[Install]
+WantedBy=multi-user.target

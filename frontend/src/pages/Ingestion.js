@@ -1,4 +1,5 @@
 import React, { useState, useEffect, useRef, useCallback } from 'react';
+import { getSupabase } from '../App';
 
 /* ─────────────────────────────────────────────
    KEYFRAME ANIMATIONS
@@ -121,6 +122,7 @@ export default function Ingestion() {
   /* ── State ── */
   const [view, setView] = useState('upload');  // upload | processing | success | error
   const [files, setFiles] = useState([]);
+  const [projectName, setProjectName] = useState('');
   const [isDragOver, setIsDragOver] = useState(false);
   const [progress, setProgress] = useState(0);
   const [currentStep, setCurrentStep] = useState(0);
@@ -132,6 +134,7 @@ export default function Ingestion() {
   const fileInputRef = useRef(null);
   const logEndRef = useRef(null);
   const timers = useRef([]);
+  const abortControllerRef = useRef(null);
 
   /* ── Auto-scroll terminal ── */
   useEffect(() => {
@@ -245,10 +248,13 @@ export default function Ingestion() {
     const formData = new FormData();
     files.forEach(f => formData.append('files', f));
 
+    abortControllerRef.current = new AbortController();
+
     try {
       const uploadRes = await fetch(`${BACKEND_URL}/api/v1/ingestion/upload`, {
         method: 'POST',
         body: formData,
+        signal: abortControllerRef.current.signal,
       });
 
       if (!uploadRes.ok) throw new Error(`Upload failed: ${uploadRes.statusText}`);
@@ -277,9 +283,35 @@ export default function Ingestion() {
       
       startPolling(sessionId, estimated);
     } catch (e) {
+      if (e.name === 'AbortError') {
+        pushLog('Upload cancelled by user.');
+        return;
+      }
       setErrorDetail(e.message);
       setView('error');
     }
+  };
+
+  const cancelIngestion = async () => {
+    if (abortControllerRef.current) {
+      abortControllerRef.current.abort();
+    }
+    clearTimers();
+    
+    const sessionId = localStorage.getItem('raikou_session_id');
+    if (sessionId) {
+      pushLog('Sending cancellation request to backend...');
+      try {
+        await fetch(`${BACKEND_URL}/api/v1/processing/${sessionId}`, {
+          method: 'DELETE',
+        });
+      } catch (e) {
+        console.warn("Failed to send delete request to backend:", e);
+      }
+      localStorage.removeItem('raikou_session_id');
+    }
+    
+    resetUpload();
   };
 
   const simulateError = () => {
@@ -312,23 +344,79 @@ export default function Ingestion() {
   useEffect(() => {
     if (view !== 'success') return;
     setCountdown(5);
+    let isCancelled = false;
+
+    const finalizeProject = async () => {
+      const sessionId = localStorage.getItem('raikou_session_id');
+      const supabase = getSupabase();
+      if (!sessionId || !supabase) {
+        window.history.pushState({}, '', '/project/new');
+        window.dispatchEvent(new PopStateEvent('popstate'));
+        return;
+      }
+      
+      const { data: { session } } = await supabase.auth.getSession();
+      if (!session) {
+        window.history.pushState({}, '', '/project/new');
+        window.dispatchEvent(new PopStateEvent('popstate'));
+        return;
+      }
+
+      const pName = projectName.trim() || 'New SAR Project';
+      
+      try {
+        // Create conversation with session_id
+        const { data: convData, error: convError } = await supabase
+          .from('conversations')
+          .insert({
+            user_id: session.user.id,
+            title: pName,
+            session_id: sessionId
+          })
+          .select()
+          .single();
+          
+        if (convError || !convData) throw convError || new Error("Failed to create conversation");
+
+        // Clear the session ID so it doesn't cause immediate redirects on future ingestions
+        localStorage.removeItem('raikou_session_id');
+
+        if (!isCancelled) {
+          window.history.pushState({}, '', `/project/${convData.id}`);
+          window.dispatchEvent(new PopStateEvent('popstate'));
+        }
+      } catch (e) {
+        console.error("Failed to finalize project:", e);
+        if (!isCancelled) {
+          window.history.pushState({}, '', '/project/new');
+          window.dispatchEvent(new PopStateEvent('popstate'));
+        }
+      }
+    };
+
     const iv = setInterval(() => {
       setCountdown(prev => {
-        if (prev <= 1) { clearInterval(iv); goWorkspace(); return 0; }
+        if (prev <= 1) { 
+          clearInterval(iv); 
+          finalizeProject();
+          return 0; 
+        }
         return prev - 1;
       });
     }, 1000);
-    return () => clearInterval(iv);
-  }, [view]); // eslint-disable-line
-
-  const goWorkspace = () => {
-    window.history.pushState({}, '', '/project/new');
-    window.dispatchEvent(new PopStateEvent('popstate'));
-  };
+    return () => {
+      clearInterval(iv);
+      isCancelled = true;
+    };
+  }, [view, projectName]); // eslint-disable-line
 
   const goBack = () => {
     window.history.pushState({}, '', '/dashboard');
     window.dispatchEvent(new PopStateEvent('popstate'));
+  };
+
+  const goWorkspace = () => {
+    setCountdown(0);
   };
 
   const hasFiles = files.length > 0;
@@ -451,6 +539,21 @@ export default function Ingestion() {
                   <code style={{ ...monoFont, color: T.accentSoft, fontSize: '12px' }}>.safe</code> folders, and{' '}
                   <code style={{ ...monoFont, color: T.accentSoft, fontSize: '12px' }}>.h5</code> files.
                 </p>
+              </div>
+
+              {/* ── Project Name Input ── */}
+              <div className="mb-6">
+                <label className="block text-white mb-2 font-medium" style={{ ...headingFont, fontSize: '14px' }}>
+                  Project Name
+                </label>
+                <input
+                  type="text"
+                  value={projectName}
+                  onChange={e => setProjectName(e.target.value)}
+                  placeholder="e.g. South China Sea Scan"
+                  className="w-full bg-[#131316] border border-[#242429] text-white placeholder:text-zinc-600 rounded-xl px-4 py-3 outline-none focus:border-[#0088ff] transition-colors"
+                  style={{ ...bodyFont, fontSize: '14px' }}
+                />
               </div>
 
               {/* ── Dropzone ── */}
@@ -597,23 +700,25 @@ export default function Ingestion() {
               {/* ── Start ingestion CTA ── */}
               <button
                 onClick={startIngestion}
-                disabled={!hasFiles}
+                disabled={!hasFiles || !projectName.trim()}
                 className="w-full py-4 rounded-xl font-semibold text-white transition-all duration-200 active:scale-[0.98]"
                 style={{
                   ...headingFont,
                   fontSize: '15px',
                   letterSpacing: '-0.01em',
-                  backgroundColor: hasFiles ? T.accent : 'rgba(255,255,255,0.05)',
-                  color: hasFiles ? T.text : T.textGhost,
-                  border: `1px solid ${hasFiles ? T.accentBd : T.border}`,
-                  cursor: hasFiles ? 'pointer' : 'not-allowed',
+                  backgroundColor: hasFiles && projectName.trim() ? T.accent : 'rgba(255,255,255,0.05)',
+                  color: hasFiles && projectName.trim() ? T.text : T.textGhost,
+                  border: `1px solid ${hasFiles && projectName.trim() ? T.accentBd : T.border}`,
+                  cursor: hasFiles && projectName.trim() ? 'pointer' : 'not-allowed',
                 }}
-                onMouseEnter={e => { if (hasFiles) e.currentTarget.style.backgroundColor = T.accentHov; }}
-                onMouseLeave={e => { if (hasFiles) e.currentTarget.style.backgroundColor = hasFiles ? T.accent : 'rgba(255,255,255,0.05)'; }}
+                onMouseEnter={e => { if (hasFiles && projectName.trim()) e.currentTarget.style.backgroundColor = T.accentHov; }}
+                onMouseLeave={e => { if (hasFiles && projectName.trim()) e.currentTarget.style.backgroundColor = hasFiles && projectName.trim() ? T.accent : 'rgba(255,255,255,0.05)'; }}
               >
-                {hasFiles
+                {hasFiles && projectName.trim()
                   ? `Start Ingestion — ${files.length} file${files.length !== 1 ? 's' : ''}`
-                  : 'Add files to begin'}
+                  : !projectName.trim()
+                    ? 'Enter a project name to begin'
+                    : 'Add files to begin'}
               </button>
 
             </div>
@@ -794,8 +899,17 @@ export default function Ingestion() {
                 </div>
               </div>
 
-              {/* Dev error trigger */}
-              <div className="mt-6 text-center">
+              {/* Action triggers */}
+              <div className="mt-6 flex flex-col items-center gap-3">
+                <button
+                  onClick={cancelIngestion}
+                  className="px-6 py-2.5 rounded-lg font-medium transition-all duration-150 active:scale-[0.97]"
+                  style={{ fontSize: '13px', border: `1px solid ${T.errorBd}`, color: T.error, backgroundColor: 'transparent', cursor: 'pointer' }}
+                  onMouseEnter={e => { e.currentTarget.style.backgroundColor = T.errorBg; }}
+                  onMouseLeave={e => { e.currentTarget.style.backgroundColor = 'transparent'; }}
+                >
+                  Cancel Ingestion
+                </button>
                 <button
                   onClick={simulateError}
                   style={{ ...monoFont, fontSize: '11px', color: T.textGhost, background: 'none', border: 'none', cursor: 'pointer', opacity: 0.5 }}

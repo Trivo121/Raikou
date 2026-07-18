@@ -8,8 +8,8 @@ import logging
 logger = logging.getLogger(__name__)
 
 def get_session_dir(session_id: str) -> str:
-    temp_dir = tempfile.gettempdir()
-    return os.path.join(temp_dir, f"raikou_session_{session_id}")
+    session_root = os.environ.get("RAIKOU_SESSION_ROOT", tempfile.gettempdir())
+    return os.path.join(session_root, f"raikou_session_{session_id}")
 
 def touch_session(session_id: str):
     """
@@ -32,7 +32,7 @@ def sweep_stale_sessions(ttl_hours: int = 2):
     """
     Finds and deletes session directories that are inactive and finished processing.
     """
-    temp_dir = tempfile.gettempdir()
+    temp_dir = os.environ.get("RAIKOU_SESSION_ROOT", tempfile.gettempdir())
     now = time.time()
     ttl_seconds = ttl_hours * 3600
     
@@ -79,3 +79,5 @@ async def start_cleanup_loop(interval_seconds: int = 900, ttl_hours: int = 2):
         except Exception as e:
             logger.error(f"Unexpected error in start_cleanup_loop: {e}")
         await asyncio.sleep(interval_seconds)
+
+

@@ -1,11 +1,11 @@
 import os
-import tempfile
 import io
 import json
 import logging
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import Response, StreamingResponse
 from pydantic import BaseModel
+from typing import Optional
 from PIL import Image
 import rasterio
 from rasterio.windows import Window
@@ -19,7 +19,8 @@ from app.services.processing.query_router import (
     resolve_routing,
     check_cached_macro
 )
-from app.services.session_cache import touch_session
+from app.services.session_cache import get_session_dir, touch_session
+from app.services.database import get_supabase
 import base64
 from openai import AsyncOpenAI
 from app.core.config import vllm_settings
@@ -58,8 +59,7 @@ async def search_patches(request: SearchQuery):
 
 @router.get("/patch/{session_id}")
 async def get_patch_image(session_id: str, row: int, col: int):
-    temp_dir = tempfile.gettempdir()
-    session_dir = os.path.join(temp_dir, f"raikou_session_{session_id}")
+    session_dir = get_session_dir(session_id)
     vrt_path = os.path.join(session_dir, "stacked.vrt")
     
     if not os.path.exists(vrt_path):
@@ -88,16 +88,64 @@ class RagQuery(BaseModel):
     query: str
     session_id: str
     limit: int = 3
+    history: list = []
+    conversation_id: Optional[str] = None
 
 @router.post("/rag/chat")
-async def rag_chat(request: RagQuery):
+async def rag_chat(request: RagQuery, req: Request):
     if not request.query:
         raise HTTPException(status_code=400, detail="Query cannot be empty")
+    
+    # Extract User ID from JWT token
+    auth_header = req.headers.get("Authorization")
+    if not auth_header or not auth_header.startswith("Bearer "):
+        raise HTTPException(status_code=401, detail="Missing or invalid Authorization header")
+    token = auth_header.split(" ")[1]
+    
+    supabase = get_supabase()
+    try:
+        user_resp = supabase.auth.get_user(token)
+        user_id = user_resp.user.id
+    except Exception as e:
+        logger.error(f"Failed to authenticate user: {e}")
+        raise HTTPException(status_code=401, detail="Invalid token")
+
+    # Handle Conversation ID
+    conversation_id = request.conversation_id
+    if not conversation_id:
+        # Create new conversation
+        title = request.query[:50] + "..." if len(request.query) > 50 else request.query
+        conv_resp = supabase.table("conversations").insert({
+            "user_id": user_id,
+            "title": title
+        }).execute()
+        conversation_id = conv_resp.data[0]["id"]
+    
+    # Cap the query length to prevent excessive token bloat (giving plenty of headroom)
+    request.query = request.query[:1000]
         
     touch_session(request.session_id)
+
+    # Write User Message to DB
+    try:
+        supabase.table("messages").insert({
+            "conversation_id": conversation_id,
+            "role": "user",
+            "content": request.query,
+            "session_id": request.session_id
+        }).execute()
+    except Exception as e:
+        logger.error(f"Failed to write user message: {e}")
     
-    temp_dir = tempfile.gettempdir()
-    session_dir = os.path.join(temp_dir, f"raikou_session_{request.session_id}")
+    # Stage 1: Keyword Classification
+    stage_1 = stage_1_keyword_pass(request.query)
+    
+    qdrant_store = QdrantStore.get_instance()
+    
+    run_retrieval = stage_1 in ["micro", "hybrid"]
+    raw_results = []
+    
+    session_dir = get_session_dir(request.session_id)
     metadata_path = os.path.join(session_dir, "metadata.json")
     
     metadata = {}
@@ -203,6 +251,9 @@ async def rag_chat(request: RagQuery):
                 "spatial_label": meta["spatial_label"],
                 "base64": ep["base64"]
             })
+            
+    patches_meta = patches_meta[:vllm_settings.MAX_PATCHES_PER_PROMPT]
+    base64_patches = base64_patches[:vllm_settings.MAX_PATCHES_PER_PROMPT]
         
     base64_overviews = []
     if final_mode in ["macro_live", "hybrid"]:
@@ -235,6 +286,8 @@ async def rag_chat(request: RagQuery):
                 except Exception as e:
                     logger.error(f"Failed to read overview image {filename}: {e}")
                     
+        base64_overviews = base64_overviews[:vllm_settings.MAX_OVERVIEWS_PER_PROMPT]
+                    
     async def event_generator():
         has_patches = bool(base64_patches)
         has_overviews = bool(base64_overviews)
@@ -243,21 +296,45 @@ async def rag_chat(request: RagQuery):
             yield json.dumps({"type": "error", "data": "Sources unavailable."}) + "\n"
             return
             
+        yield json.dumps({"type": "conversation_id", "data": conversation_id}) + "\n"
         yield json.dumps({"type": "sources", "mode": final_mode, "data": patches_meta}) + "\n"
+
+        full_assistant_response = ""
+        status = "complete"
 
         if macro_cached:
             yield json.dumps({"type": "text", "data": cached_caption}) + "\n"
+            full_assistant_response = cached_caption
+            try:
+                supabase.table("messages").insert({
+                    "conversation_id": conversation_id,
+                    "role": "assistant",
+                    "content": full_assistant_response,
+                    "mode": "macro_cached",
+                    "sources": patches_meta,
+                    "session_id": request.session_id,
+                    "status": status
+                }).execute()
+            except Exception as e:
+                logger.error(f"Failed to write assistant message: {e}")
             return
 
-        prompt_text = (
+        system_prompt = (
             "You are an expert Synthetic Aperture Radar (SAR) image analyst. "
-            "Analyze the provided SAR image(s) and provide a detailed, conversational response answering the following query. "
+            "Analyze the provided SAR image(s) and provide a detailed, conversational response answering the user's query. "
             "Each image provided below is labeled with its specific location in the overall scene. Use these spatial coordinates to understand the physical relationship between objects across different patches. "
-            "If you detect relevant objects, provide their bounding box coordinates, but you MUST also explain what you observe in clear, natural language.\n\n"
-            f"User Query: {request.query}"
+            "If you detect relevant objects, provide their bounding box coordinates, but you MUST also explain what you observe in clear, natural language."
         )
         
-        content = [{"type": "text", "text": prompt_text}]
+        messages = [{"role": "system", "content": system_prompt}]
+        
+        # Add conversation history
+        for msg in request.history:
+            role = msg.get("role", "user")
+            text_content = msg.get("content", "")
+            messages.append({"role": role, "content": text_content})
+        
+        content = [{"type": "text", "text": f"User Query: {request.query}"}]
         
         image_idx = 1
         for ov in base64_overviews:
@@ -280,7 +357,7 @@ async def rag_chat(request: RagQuery):
             content.append({"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{p['base64']}"}})
             image_idx += 1
             
-        messages = [{"role": "user", "content": content}]
+        messages.append({"role": "user", "content": content})
 
         try:
             stream = await client.chat.completions.create(
@@ -292,9 +369,27 @@ async def rag_chat(request: RagQuery):
             )
             async for chunk in stream:
                 if chunk.choices and chunk.choices[0].delta.content:
-                    yield json.dumps({"type": "text", "data": chunk.choices[0].delta.content}) + "\n"
+                    text_chunk = chunk.choices[0].delta.content
+                    full_assistant_response += text_chunk
+                    yield json.dumps({"type": "text", "data": text_chunk}) + "\n"
         except Exception as e:
             logger.error(f"vLLM completion error: {e}")
+            status = "interrupted"
             yield json.dumps({"type": "error", "data": str(e)}) + "\n"
+        finally:
+            try:
+                supabase.table("messages").insert({
+                    "conversation_id": conversation_id,
+                    "role": "assistant",
+                    "content": full_assistant_response,
+                    "mode": final_mode,
+                    "sources": patches_meta,
+                    "session_id": request.session_id,
+                    "status": status
+                }).execute()
+            except Exception as e:
+                logger.error(f"Failed to write assistant message: {e}")
 
     return StreamingResponse(event_generator(), media_type="application/x-ndjson")
+
+
