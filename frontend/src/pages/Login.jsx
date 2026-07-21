@@ -1,5 +1,6 @@
 import React, { useState, useEffect } from 'react';
-import { getSupabase } from '../App';
+import { Link, useLocation, useNavigate } from 'react-router-dom';
+import { useAuth } from '../auth/AuthProvider';
 
 /* ─────────────────────────────────────────────
    KEYFRAME ANIMATIONS
@@ -31,6 +32,9 @@ const headingFont = { fontFamily: "'Space Grotesk', sans-serif" };
 const bodyFont = { fontFamily: "'Inter', -apple-system, BlinkMacSystemFont, sans-serif" };
 
 export default function Login() {
+  const { signInWithGoogle, signInWithPassword, signUp } = useAuth();
+  const navigate = useNavigate();
+  const location = useLocation();
   const [isSignUp, setIsSignUp] = useState(false);
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
@@ -47,28 +51,26 @@ export default function Login() {
     return () => document.head.removeChild(link);
   }, []);
 
+  const destination = location.state?.from?.pathname || '/dashboard';
+
   const handleSubmit = async (e) => {
     e.preventDefault();
     setIsLoading(true);
     setError(null);
     setSuccessMsg(null);
 
-    const client = getSupabase();
-    if (!client) {
-      setError("Supabase client not initialized.");
-      setIsLoading(false);
-      return;
-    }
-
     try {
+      let result;
       if (isSignUp) {
-        const { error } = await client.auth.signUp({ email, password });
+        result = await signUp({ email, password });
+        const { error } = result || {};
         if (error) throw error;
         setSuccessMsg("Success! Please check your email to confirm your account.");
       } else {
-        const { error } = await client.auth.signInWithPassword({ email, password });
+        result = await signInWithPassword({ email, password });
+        const { error } = result || {};
         if (error) throw error;
-        // App.js auth listener will handle redirect
+        navigate(destination, { replace: true });
       }
     } catch (err) {
       setError(err.message);
@@ -78,25 +80,23 @@ export default function Login() {
   };
 
   const handleGoogleAuth = async () => {
-    const client = getSupabase();
-    if (!client) {
-      alert(
-        "Supabase client could not be initialized.\n\n" +
-        "React requires environment variables in the browser to start with 'REACT_APP_'.\n\n" +
-        "Please add duplicate entries in your .env file:\n" +
-        "REACT_APP_SUPABASE_URL=...\n" +
-        "REACT_APP_SUPABASE_ANON_KEY=..."
-      );
-      return;
-    }
-    const { data, error } = await client.auth.signInWithOAuth({
-      provider: 'google',
-      options: {
-        redirectTo: window.location.origin,
-      },
-    });
-    if (error) {
-      console.error('Error logging in with Google:', error.message);
+    setIsLoading(true);
+    setError(null);
+    setSuccessMsg(null);
+
+    try {
+      const { data, error: oauthError } = (await signInWithGoogle()) || {};
+      if (oauthError) throw oauthError;
+      if (!data?.url) {
+        throw new Error('Google sign-in could not be started. Please try again.');
+      }
+
+      // A full-page redirect is reliable across browsers and cannot be
+      // blocked like an OAuth popup.
+      window.location.assign(data.url);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Google sign-in failed. Please try again.');
+      setIsLoading(false);
     }
   };
 
@@ -122,7 +122,7 @@ export default function Login() {
           }}
         >
           {/* Logo */}
-          <a href="/" className="flex items-center gap-2.5 select-none transition-opacity hover:opacity-80" style={{ textDecoration: 'none' }}>
+          <Link to="/" className="flex items-center gap-2.5 select-none transition-opacity hover:opacity-80" style={{ textDecoration: 'none' }}>
             <span
               className="block w-2 h-2 rounded-full"
               style={{ backgroundColor: T.accent, boxShadow: '0 0 10px rgba(0,153,255,0.9)' }}
@@ -133,7 +133,7 @@ export default function Login() {
             >
               Raikou
             </span>
-          </a>
+          </Link>
         </nav>
 
         {/* ══════════════════════════════════════
@@ -265,6 +265,7 @@ export default function Login() {
             <button
               onClick={handleGoogleAuth}
               type="button"
+              disabled={isLoading}
               className="w-full h-12 flex items-center justify-center gap-3 rounded-xl border bg-transparent transition-all active:scale-[0.98]"
               style={{ borderColor: T.border, color: T.text, fontSize: '14.5px' }}
               onMouseEnter={e => e.currentTarget.style.backgroundColor = 'rgba(255,255,255,0.03)'}
@@ -276,7 +277,7 @@ export default function Login() {
                 <path d="M5.84 14.09c-.22-.66-.35-1.36-.35-2.09s.13-1.43.35-2.09V7.07H2.18C1.43 8.55 1 10.22 1 12s.43 3.45 1.18 4.93l2.85-2.22.81-.62z" fill="#FBBC05" />
                 <path d="M12 5.38c1.62 0 3.06.56 4.21 1.64l3.15-3.15C17.45 2.09 14.97 1 12 1 7.7 1 3.99 3.47 2.18 7.07l3.66 2.84c.87-2.6 3.3-4.53 6.16-4.53z" fill="#EA4335" />
               </svg>
-              Continue with Google
+              {isLoading ? 'Opening Google…' : 'Continue with Google'}
             </button>
 
             {/* Toggle Sign Up / Sign In */}

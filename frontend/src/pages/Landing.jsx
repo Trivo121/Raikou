@@ -1,4 +1,5 @@
-import React, { useEffect, useState } from 'react';
+import React, { useEffect } from 'react';
+import { useNavigate } from 'react-router-dom';
 
 /* ─────────────────────────────────────────────
    KEYFRAME ANIMATIONS
@@ -41,9 +42,9 @@ const T = {
    CONTENT DATA
 ───────────────────────────────────────────── */
 const STATS = [
-  { val: '512-d', label: 'Shared latent space' },
-  { val: '< 5 ms', label: 'Query latency' },
-  { val: '24 / 7', label: 'All-weather retrieval' },
+  { val: '768-d', label: 'SARCLIP embedding space' },
+  { val: 'SAR', label: 'Scene-first workflow' },
+  { val: 'V1', label: 'Evidence-grounded retrieval' },
 ];
 
 const FEATURES = [
@@ -55,12 +56,12 @@ const FEATURES = [
   {
     eyebrow: 'Retrieval',
     title: 'Cross-modal vector search',
-    body: 'Query with a text string or an optical image. Both are mapped into the same 512-dimensional space as indexed SAR patches — no modality mismatch.',
+    body: 'Query indexed SAR patches with text. Each result stays linked to its source scene and patch evidence.',
   },
   {
     eyebrow: 'Performance',
-    title: 'Real-time on edge hardware',
-    body: 'HNSW indexing via Qdrant returns nearest-neighbour matches in milliseconds, even on constrained hardware without a dedicated GPU cluster.',
+    title: 'Evidence-first search',
+    body: 'Qdrant returns semantically related SAR patches while preserving the project, scene, artifact, and model metadata required for review.',
   },
 ];
 
@@ -70,22 +71,22 @@ const USE_CASES = [
     modality: 'Text → SAR',
     title: 'Weather-blinded search',
     prompt: '"Commercial cargo vessels traveling south"',
-    body: 'A tropical cyclone blankets the strait. Optical satellites see only white cloud tops. Type a query — the system searches live SAR frames and returns vessel positions with exact coordinates.',
+    body: 'A tropical cyclone blankets the strait. Search your indexed SAR scenes and inspect the returned scene and patch evidence before drawing a conclusion.',
   },
   {
     tag: 'Use case B',
-    modality: 'Optical → SAR',
-    title: 'Intelligence match',
-    prompt: 'submarine_port_optical_03_2024.tif',
-    body: 'You hold a three-month-old daytime photo of a submarine port. Upload it. Structural geometry is extracted, the SAR index is queried, and the midnight radar capture of that exact coordinate is surfaced.',
+    modality: 'SAR → evidence',
+    title: 'Scene-grounded review',
+    prompt: '"bright linear features near shoreline"',
+    body: 'Search the scenes in a project, then review the matching patch bounds, source artifact, and model version alongside the result.',
   },
 ];
 
 const PIPELINE = [
-  { step: 'Ingest', desc: 'GeoTIFF, Sentinel-1 SAFE, HDF5. Scene metadata extracted automatically.' },
-  { step: 'Condition', desc: 'Radiometric calibration. Lee speckle filter. 256 × 256 patch tiling.' },
-  { step: 'Encode', desc: 'SARCLIP embeds each patch into a 512-d vector at FP16 precision.' },
-  { step: 'Retrieve', desc: 'Text or image query maps to the same space. Top-K results instantly.' },
+  { step: 'Ingest', desc: 'Upload a supported SAR scene and record its project ownership and metadata.' },
+  { step: 'Process', desc: 'Build the overview, patch tiles, and scene evidence artifacts.' },
+  { step: 'Encode', desc: 'SARCLIP embeds each patch into a 768-dimensional vector with model metadata.' },
+  { step: 'Retrieve', desc: 'Text search returns project-scoped patch evidence for review.' },
 ];
 
 /* ─────────────────────────────────────────────
@@ -115,7 +116,7 @@ const sectionHeading = {
    COMPONENT
 ───────────────────────────────────────────── */
 export default function Landing() {
-  const [session, setSession] = useState(null);
+  const navigate = useNavigate();
 
   /* Load Space Grotesk (closest public match to GT Walsheim) + Inter */
   useEffect(() => {
@@ -126,41 +127,11 @@ export default function Landing() {
     return () => document.head.removeChild(link);
   }, []);
 
-  useEffect(() => {
-    import('../App').then(({ getSupabase }) => {
-      const supabase = getSupabase();
-      if (supabase) {
-        supabase.auth.getSession().then(({ data }) => setSession(data.session));
-        supabase.auth.onAuthStateChange((_event, sess) => setSession(sess));
-      }
-    });
-  }, []);
-
-  /* Both CTAs are placeholders — Supabase auth wired in Login.js */
-  const goLogin = () => { 
-    window.history.pushState({}, '', '/login');
-    window.dispatchEvent(new PopStateEvent('popstate'));
-  };
+  const goLogin = () => navigate('/login');
 
   return (
     <>
       <style>{KEYFRAMES}</style>
-
-      {/* Debug Info */}
-      <div className="fixed bottom-4 left-4 z-[999] bg-black/80 text-white p-4 rounded-lg text-xs font-mono border border-white/20 shadow-xl backdrop-blur-md">
-        <strong className="text-blue-400">DEBUG INFO</strong><br/>
-        Auth State: {session ? '🟢 Authenticated' : '🔴 Unauthenticated'}<br/>
-        User ID: {session?.user?.id || 'None'}<br/>
-        <button 
-          onClick={() => {
-            window.history.pushState({}, '', '/dashboard');
-            window.dispatchEvent(new PopStateEvent('popstate'));
-          }}
-          className="mt-2 px-2 py-1 bg-white/10 hover:bg-white/20 rounded border border-white/20"
-        >
-          Force Route to /dashboard
-        </button>
-      </div>
 
       <div
         style={{ ...bodyFont, backgroundColor: T.bg, color: T.text, fontSize: '14px', lineHeight: '1.65', overflowX: 'hidden', minHeight: '100vh' }}
@@ -315,8 +286,8 @@ export default function Landing() {
               style={{ fontSize: '16px', color: T.textMuted, maxWidth: '560px' }}
             >
               A multimodal retrieval system that maps SAR radar backscatter and optical
-              imagery into a shared latent space — enabling real-time, sensor-agnostic
-              satellite search through storms, darkness, and denied conditions.
+              imagery into a shared latent space — enabling project-scoped,
+              evidence-linked satellite search through storms, darkness, and denied conditions.
             </p>
 
             {/* CTA buttons */}
