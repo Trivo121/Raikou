@@ -140,7 +140,14 @@ def _build_vrt(zip_path: str, tiff_paths: list[str]) -> str:
     return vrt_xml
 
 def _build_vrt_local(tiff_paths: list[str]) -> str:
-    """Builds a VRT XML string stacking local tiff files directly from disk."""
+    """Build a VRT for local uploads without discarding display RGB channels.
+
+    A usual SAR upload supplies one or two single-band measurement TIFFs.  A
+    generic GeoTIFF can instead be an RGB/RGBA visualisation.  The former keeps
+    one source band per file; the latter exposes its first three channels so
+    downstream previews and multimodal analysis see the actual image rather
+    than an arbitrary first channel (or alpha).
+    """
     dtype_map = {
         'uint8': 'Byte',
         'uint16': 'UInt16',
@@ -153,12 +160,14 @@ def _build_vrt_local(tiff_paths: list[str]) -> str:
     
     ref_w, ref_h, ref_dt = None, None, None
     vrt_dt = None
+    source_band_counts: list[int] = []
     
     for i, tiff in enumerate(tiff_paths):
         try:
             with rasterio.open(tiff) as src:
                 w, h = src.width, src.height
                 dt = src.dtypes[0]
+                source_band_counts.append(src.count)
                 
                 if i == 0:
                     ref_w, ref_h, ref_dt = w, h, dt
@@ -173,12 +182,19 @@ def _build_vrt_local(tiff_paths: list[str]) -> str:
                 raise e
             raise HTTPException(status_code=400, detail=f"Corrupted or invalid TIFF file: {os.path.basename(tiff)}")
         
+    if len(tiff_paths) == 1 and source_band_counts[0] >= 3:
+        # RGB(A) generic image: alpha is intentionally not included.
+        source_specs = [(tiff_paths[0], source_band) for source_band in range(1, 4)]
+    else:
+        # Calibrated SAR measurements: one selected measurement band per file.
+        source_specs = [(tiff, 1) for tiff in tiff_paths]
+
     vrt_xml = f'<VRTDataset rasterXSize="{ref_w}" rasterYSize="{ref_h}">\n'
-    for i, tiff in enumerate(tiff_paths, 1):
+    for i, (tiff, source_band) in enumerate(source_specs, 1):
         vrt_xml += f'''  <VRTRasterBand dataType="{vrt_dt}" band="{i}">
     <SimpleSource>
       <SourceFilename relativeToVRT="1">{os.path.basename(tiff)}</SourceFilename>
-      <SourceBand>1</SourceBand>
+      <SourceBand>{source_band}</SourceBand>
       <SrcRect xOff="0" yOff="0" xSize="{ref_w}" ySize="{ref_h}" />
       <DstRect xOff="0" yOff="0" xSize="{ref_w}" ySize="{ref_h}" />
     </SimpleSource>

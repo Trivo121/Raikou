@@ -1,0 +1,18 @@
+[Unit]
+Description=Raikou M3 PostgreSQL outbox dispatcher
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=ubuntu
+WorkingDirectory=/home/ubuntu/backend
+EnvironmentFile=-/home/ubuntu/backend/.env
+Environment=PYTHONUNBUFFERED=1
+Environment=ENVIRONMENT=production
+ExecStart=/home/ubuntu/sar_env/bin/python -m app.workers.dispatcher
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

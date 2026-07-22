@@ -5,6 +5,9 @@
 .env.production
 .env.staging
 
+# Private deployment credentials must never enter source control.
+*.pem
+
 # Node.js
 node_modules/
 dist/
@@ -42,6 +45,11 @@ share/python-wheels/
 *.egg
 MANIFEST
 
+# The Python build-artifact rule above intentionally ignores generic `lib/`
+# directories, but React source modules live under frontend/src/lib.
+!frontend/src/lib/
+!frontend/src/lib/**
+
 # Editors
 .vscode/
 .idea/
@@ -54,3 +62,6 @@ MANIFEST
 #folders
 SARVLM/
 models/
+
+# Supabase CLI local artifacts
+supabase/.temp/

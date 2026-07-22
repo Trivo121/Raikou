@@ -1,0 +1,165 @@
+name: raikou-m3
+
+services:
+  redis:
+    image: redis:7.4-alpine
+    command: redis-server --appendonly yes --save 60 1
+    volumes:
+      - redis-data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+  minio:
+    image: minio/minio:RELEASE.2025-04-22T22-12-26Z
+    command: server /data --console-address ":9001"
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER:-raikou-dev}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:-raikou-dev-change-me}
+    ports:
+      - "9000:9000"
+      - "9001:9001"
+    volumes:
+      - minio-data:/data
+    healthcheck:
+      test: ["CMD", "mc", "ready", "local"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+  minio-init:
+    image: minio/mc:RELEASE.2025-05-21T01-59-54Z
+    depends_on:
+      minio:
+        condition: service_healthy
+    entrypoint: >-
+      /bin/sh -c "mc alias set local http://minio:9000 $${MINIO_ROOT_USER} $${MINIO_ROOT_PASSWORD} && mc mb --ignore-existing local/$${STORAGE_BUCKET}"
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER:-raikou-dev}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:-raikou-dev-change-me}
+      STORAGE_BUCKET: ${STORAGE_BUCKET:-raikou-dev}
+
+  qdrant:
+    image: qdrant/qdrant:v1.13.6
+    volumes:
+      - qdrant-data:/qdrant/storage
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:6333/readyz >/dev/null"]
+      interval: 10s
+      timeout: 3s
+      retries: 12
+
+  vllm:
+    profiles: ["gpu"]
+    image: vllm/vllm-openai:v0.24.0
+    command: >-
+      --model ${SARCHAT_MODEL_ID:-/models/SARChat-InternVL2.5-2B}
+      --host 0.0.0.0 --port 8001 --gpu-memory-utilization ${VLLM_GPU_MEMORY_UTILIZATION:-0.45}
+      --max-model-len ${VLLM_MAX_MODEL_LEN:-4096} --max-num-seqs ${VLLM_MAX_NUM_SEQS:-2}
+      --limit-mm-per-prompt '{"image":4}'
+    volumes:
+      - ${MODEL_ROOT:-./models}:/models:ro
+    gpus: all
+    healthcheck:
+      test: ["CMD-SHELL", "python -c \"import urllib.request; urllib.request.urlopen('http://127.0.0.1:8001/v1/models', timeout=5)\""]
+      interval: 30s
+      timeout: 10s
+      retries: 20
+
+  api:
+    build: ./backend
+    command: python -m uvicorn main:app --host 0.0.0.0 --port 8000
+    working_dir: /app
+    env_file: ./backend/.env
+    environment: &runtime-env
+      ENVIRONMENT: development
+      ENABLE_LEGACY_SESSION_API: "false"
+      REDIS_URL: redis://redis:6379/0
+      STORAGE_BACKEND: minio
+      STORAGE_BUCKET: ${STORAGE_BUCKET:-raikou-dev}
+      STORAGE_ENDPOINT_URL: http://minio:9000
+      STORAGE_FORCE_PATH_STYLE: "true"
+      STORAGE_ACCESS_KEY_ID: ${MINIO_ROOT_USER:-raikou-dev}
+      STORAGE_SECRET_ACCESS_KEY: ${MINIO_ROOT_PASSWORD:-raikou-dev-change-me}
+      QDRANT_URL: http://qdrant:6333
+      VLLM_BASE_URL: http://vllm:8001/v1
+    ports:
+      - "8000:8000"
+    depends_on:
+      redis:
+        condition: service_healthy
+      minio-init:
+        condition: service_completed_successfully
+      qdrant:
+        condition: service_healthy
+
+  dispatcher:
+    build: ./backend
+    command: python -m app.workers.dispatcher
+    working_dir: /app
+    env_file: ./backend/.env
+    environment: *runtime-env
+    depends_on:
+      redis:
+        condition: service_healthy
+      minio-init:
+        condition: service_completed_successfully
+
+  worker-cpu:
+    build: ./backend
+    command: python -m app.workers.runner --class cpu
+    working_dir: /app
+    env_file: ./backend/.env
+    environment: *runtime-env
+    depends_on:
+      redis:
+        condition: service_healthy
+      minio-init:
+        condition: service_completed_successfully
+      qdrant:
+        condition: service_healthy
+
+  worker-gpu:
+    profiles: ["gpu"]
+    build: ./backend
+    command: python -m app.workers.runner --class gpu
+    working_dir: /app
+    env_file: ./backend/.env
+    environment:
+      <<: *runtime-env
+      CUDA_VISIBLE_DEVICES: ${CUDA_VISIBLE_DEVICES:-0}
+      M3_GPU_INFERENCE_CONCURRENCY: ${M3_GPU_INFERENCE_CONCURRENCY:-1}
+    gpus: all
+    depends_on:
+      redis:
+        condition: service_healthy
+      minio-init:
+        condition: service_completed_successfully
+      qdrant:
+        condition: service_healthy
+
+  gateway:
+    profiles: ["release"]
+    image: caddy:2.8-alpine
+    ports:
+      - "80:80"
+      - "443:443"
+    environment:
+      PUBLIC_HOST: ${PUBLIC_HOST:?Set a DNS host for automatic TLS}
+    volumes:
+      - ./deployment/Caddyfile:/etc/caddy/Caddyfile:ro
+      - ./frontend/dist:/srv:ro
+      - caddy-data:/data
+      - caddy-config:/config
+    depends_on:
+      api:
+        condition: service_started
+
+volumes:
+  redis-data:
+  minio-data:
+  qdrant-data:
+  caddy-data:
+  caddy-config:

@@ -1,0 +1,23 @@
+{$PUBLIC_HOST} {
+    encode zstd gzip
+    root * /srv
+
+    @api path /api/* /healthz /readyz
+    reverse_proxy @api api:8000 {
+        transport http {
+            read_timeout 120s
+            write_timeout 120s
+        }
+    }
+
+    header {
+        X-Content-Type-Options "nosniff"
+        X-Frame-Options "DENY"
+        Referrer-Policy "strict-origin-when-cross-origin"
+        Permissions-Policy "camera=(), microphone=(), geolocation=(), payment=(), usb=()"
+        Content-Security-Policy "default-src 'self'; base-uri 'self'; frame-ancestors 'none'; form-action 'self'; connect-src 'self' https://*.supabase.co https://*.amazonaws.com; img-src 'self' data: blob: https:; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src 'self' https://fonts.gstatic.com; script-src 'self'; object-src 'none'"
+    }
+
+    try_files {path} /index.html
+    file_server
+}

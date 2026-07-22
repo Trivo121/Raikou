@@ -9,6 +9,7 @@ from app.services.processing.scene_record import build_scene_record, load_scene_
 from app.services.models.sarclip_encoder import encode_patch_stream, EncodedPatch
 from app.services.storage.qdrant import QdrantStore
 from app.services.session_cache import get_session_dir, touch_session
+from app.core.config import settings
 
 import logging
 import requests
@@ -56,13 +57,17 @@ def generate_cached_caption_sync(session_id: str):
             })
             
         payload = {
-            "model": "/models/SARChat-Phi-3.5-vision-instruct",
+            "model": settings.SARCHAT_MODEL_ID,
             "messages": [{"role": "user", "content": content}],
             "max_tokens": 512,
             "temperature": 0.2
         }
         
-        resp = requests.post("http://localhost:8001/v1/chat/completions", json=payload, timeout=30)
+        resp = requests.post(
+            f"{settings.VLLM_BASE_URL.rstrip('/')}/chat/completions",
+            json=payload,
+            timeout=30,
+        )
         resp.raise_for_status()
         result = resp.json()
         
@@ -88,7 +93,7 @@ def process_session_background(session_id: str, vrt_path: str, metadata: dict, w
         )
         
         qdrant_store = QdrantStore.get_instance()
-        collection_name = "sar_patches"
+        collection_name = settings.QDRANT_COLLECTION
         qdrant_store.initialize_collection(collection_name)
         
         patch_iterator = extract_and_preprocess_patches(vrt_path, session_id, metadata)
@@ -195,7 +200,7 @@ async def start_processing(session_id: str, background_tasks: BackgroundTasks):
 async def get_processing_status(session_id: str):
     touch_session(session_id)
     qdrant_store = QdrantStore.get_instance()
-    count = qdrant_store.count_vectors_by_session("sar_patches", session_id)
+    count = qdrant_store.count_vectors_by_session(settings.QDRANT_COLLECTION, session_id)
     
     session_dir = get_session_dir(session_id)
     
@@ -249,7 +254,7 @@ async def cancel_processing(session_id: str):
     # Delete vectors from Qdrant
     try:
         qdrant_store = QdrantStore.get_instance()
-        qdrant_store.delete_vectors_by_session("sar_patches", session_id)
+        qdrant_store.delete_vectors_by_session(settings.QDRANT_COLLECTION, session_id)
     except Exception as e:
         logger.error(f"Failed to delete Qdrant vectors for cancelled session {session_id}: {e}")
         

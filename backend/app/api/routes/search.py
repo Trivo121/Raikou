@@ -2,7 +2,9 @@ import os
 import io
 import json
 import logging
-from fastapi import APIRouter, HTTPException, Request
+from uuid import UUID
+
+from fastapi import APIRouter, Depends, HTTPException
 from fastapi.responses import Response, StreamingResponse
 from pydantic import BaseModel
 from typing import Optional
@@ -21,23 +23,41 @@ from app.services.processing.query_router import (
 )
 from app.services.session_cache import get_session_dir, touch_session
 from app.services.database import get_supabase
+from app.api.deps import (
+    CurrentUser,
+    get_current_user,
+    resolve_owned_conversation,
+    resolve_owned_scene,
+)
 import base64
 from openai import AsyncOpenAI
-from app.core.config import vllm_settings
+from app.core.config import settings, vllm_settings
 
 logger = logging.getLogger(__name__)
-client = AsyncOpenAI(base_url="http://localhost:8001/v1", api_key="sk-no-key")
+client = AsyncOpenAI(base_url=settings.VLLM_BASE_URL, api_key="sk-no-key")
 
 router = APIRouter()
 
 class SearchQuery(BaseModel):
     query: str
+    scene_id: UUID
     limit: int = 10
 
 @router.post("/")
-async def search_patches(request: SearchQuery):
+async def search_patches(
+    request: SearchQuery,
+    current_user: CurrentUser = Depends(get_current_user),
+):
+    """Search patches only within a scene owned by the verified user.
+
+    The old global collection search was unsafe once vectors became shared
+    between users. M1 makes scope mandatory even while this legacy route is
+    kept for local compatibility.
+    """
     if not request.query:
         raise HTTPException(status_code=400, detail="Query cannot be empty")
+
+    scene = await resolve_owned_scene(request.scene_id, current_user)
         
     encoder = SARCLIPEncoder.get()
     try:
@@ -47,10 +67,13 @@ async def search_patches(request: SearchQuery):
         
     store = QdrantStore.get_instance()
     try:
-        results = store.search_vectors(
-            collection_name="sar_patches",
+        results = store.search_scoped_vectors(
+            collection_name=settings.QDRANT_COLLECTION,
             query_vector=query_vector,
-            limit=request.limit
+            limit=request.limit,
+            owner_id=current_user.id,
+            project_id=str(scene["project_id"]),
+            scene_id=str(request.scene_id),
         )
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to query Qdrant: {e}")
@@ -89,26 +112,17 @@ class RagQuery(BaseModel):
     session_id: str
     limit: int = 3
     history: list = []
-    conversation_id: Optional[str] = None
+    conversation_id: Optional[UUID] = None
 
 @router.post("/rag/chat")
-async def rag_chat(request: RagQuery, req: Request):
+async def rag_chat(
+    request: RagQuery,
+    current_user: CurrentUser = Depends(get_current_user),
+):
     if not request.query:
         raise HTTPException(status_code=400, detail="Query cannot be empty")
-    
-    # Extract User ID from JWT token
-    auth_header = req.headers.get("Authorization")
-    if not auth_header or not auth_header.startswith("Bearer "):
-        raise HTTPException(status_code=401, detail="Missing or invalid Authorization header")
-    token = auth_header.split(" ")[1]
-    
+
     supabase = get_supabase()
-    try:
-        user_resp = supabase.auth.get_user(token)
-        user_id = user_resp.user.id
-    except Exception as e:
-        logger.error(f"Failed to authenticate user: {e}")
-        raise HTTPException(status_code=401, detail="Invalid token")
 
     # Handle Conversation ID
     conversation_id = request.conversation_id
@@ -116,10 +130,15 @@ async def rag_chat(request: RagQuery, req: Request):
         # Create new conversation
         title = request.query[:50] + "..." if len(request.query) > 50 else request.query
         conv_resp = supabase.table("conversations").insert({
-            "user_id": user_id,
+            "user_id": current_user.id,
+            "owner_id": current_user.id,
             "title": title
         }).execute()
         conversation_id = conv_resp.data[0]["id"]
+    else:
+        await resolve_owned_conversation(conversation_id, current_user)
+
+    conversation_id = str(conversation_id)
     
     # Cap the query length to prevent excessive token bloat (giving plenty of headroom)
     request.query = request.query[:1000]
@@ -183,7 +202,7 @@ async def rag_chat(request: RagQuery, req: Request):
         store = QdrantStore.get_instance()
         try:
             raw_results = store.search_vectors(
-                collection_name="sar_patches",
+                collection_name=settings.QDRANT_COLLECTION,
                 query_vector=query_vector,
                 limit=max(10, effective_limit),
                 session_id=request.session_id
@@ -361,7 +380,7 @@ async def rag_chat(request: RagQuery, req: Request):
 
         try:
             stream = await client.chat.completions.create(
-                model="/models/SARChat-Phi-3.5-vision-instruct",
+                model=settings.SARCHAT_MODEL_ID,
                 messages=messages,
                 stream=True,
                 max_tokens=vllm_settings.OUTPUT_MAX_TOKENS,
@@ -374,7 +393,9 @@ async def rag_chat(request: RagQuery, req: Request):
                     yield json.dumps({"type": "text", "data": text_chunk}) + "\n"
         except Exception as e:
             logger.error(f"vLLM completion error: {e}")
-            status = "interrupted"
+            # ``interrupted`` was a pre-M1 free-form value. Persist the
+            # normalized lifecycle value required by message_status instead.
+            status = "failed"
             yield json.dumps({"type": "error", "data": str(e)}) + "\n"
         finally:
             try:

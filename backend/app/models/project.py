@@ -1,14 +1,9 @@
-from pydantic import BaseModel
+"""Backward-compatible import location for project API schemas."""
 
-class ProjectBase(BaseModel):
-    name: str
-    description: str | None = None
+from app.schemas.projects import ProjectBase, ProjectCreate, ProjectRead, ProjectUpdate
 
-class ProjectCreate(ProjectBase):
-    pass
+# Existing imports can continue to use ``Project`` while new code uses the more
+# explicit ``ProjectRead`` name.
+Project = ProjectRead
 
-class Project(ProjectBase):
-    id: str
-
-    class Config:
-        from_attributes = True
+__all__ = ["Project", "ProjectBase", "ProjectCreate", "ProjectRead", "ProjectUpdate"]

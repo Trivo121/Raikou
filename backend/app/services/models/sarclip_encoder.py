@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import os
 import time
 import logging
 import contextlib
@@ -11,6 +10,7 @@ import torch
 from PIL import Image
 import open_clip
 
+from app.core.config import settings
 from app.services.processing.patch_pipeline import ProcessedPatch, plan_patches
 
 logger = logging.getLogger("sarclip_encoder")
@@ -20,13 +20,9 @@ logger = logging.getLogger("sarclip_encoder")
 # --------------------------------------------------------------------------
 
 MODEL_NAME = "ViT-L-14"
-SARCLIP_CHECKPOINT_PATH = os.environ.get(
-    "SARCLIP_CHECKPOINT_PATH", "/models/sarclip_vit_l14.pt"
-)
-DEVICE = os.environ.get(
-    "SARCLIP_DEVICE", "cuda" if torch.cuda.is_available() else "cpu"
-)
-BATCH_SIZE = int(os.environ.get("SARCLIP_BATCH_SIZE", "32"))
+SARCLIP_CHECKPOINT_PATH = settings.SARCLIP_CHECKPOINT_PATH
+DEVICE = settings.SARCLIP_DEVICE or ("cuda" if torch.cuda.is_available() else "cpu")
+BATCH_SIZE = settings.SARCLIP_BATCH_SIZE
 
 # Expected on a T4 per the design doc: 2-5 min for a full Sentinel-1 scene.
 # Not enforced anywhere — just context for why progress signalling matters.

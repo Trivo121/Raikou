@@ -5,10 +5,12 @@ import tempfile
 import asyncio
 import logging
 
+from app.core.config import settings
+
 logger = logging.getLogger(__name__)
 
 def get_session_dir(session_id: str) -> str:
-    session_root = os.environ.get("RAIKOU_SESSION_ROOT", tempfile.gettempdir())
+    session_root = settings.SESSION_ROOT or tempfile.gettempdir()
     return os.path.join(session_root, f"raikou_session_{session_id}")
 
 def touch_session(session_id: str):
@@ -32,7 +34,7 @@ def sweep_stale_sessions(ttl_hours: int = 2):
     """
     Finds and deletes session directories that are inactive and finished processing.
     """
-    temp_dir = os.environ.get("RAIKOU_SESSION_ROOT", tempfile.gettempdir())
+    temp_dir = settings.SESSION_ROOT or tempfile.gettempdir()
     now = time.time()
     ttl_seconds = ttl_hours * 3600
     
@@ -68,10 +70,11 @@ def sweep_stale_sessions(ttl_hours: int = 2):
     except Exception as e:
         logger.error(f"Error during sweep_stale_sessions: {e}")
 
-async def start_cleanup_loop(interval_seconds: int = 900, ttl_hours: int = 2):
+async def start_cleanup_loop(interval_seconds: int | None = None, ttl_hours: int = 2):
     """
     Infinite loop that sweeps stale sessions periodically (default every 15 min).
     """
+    interval_seconds = interval_seconds or settings.SESSION_CLEANUP_INTERVAL_SECONDS
     logger.info(f"Session cleanup background task started (TTL: {ttl_hours}h, Interval: {interval_seconds}s)")
     while True:
         try:

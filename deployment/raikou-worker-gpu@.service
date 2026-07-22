@@ -1,0 +1,22 @@
+[Unit]
+Description=Raikou M3 GPU worker for CUDA device %i
+After=network-online.target raikou-outbox-dispatcher.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=ubuntu
+WorkingDirectory=/home/ubuntu/backend
+EnvironmentFile=-/home/ubuntu/backend/.env
+Environment=PYTHONUNBUFFERED=1
+Environment=ENVIRONMENT=production
+# One systemd instance is allowed per physical GPU. Set this only after the
+# SARCLIP VRAM profiling script confirms the target concurrency is safe.
+Environment=CUDA_VISIBLE_DEVICES=%i
+Environment=M3_GPU_INFERENCE_CONCURRENCY=1
+ExecStart=/home/ubuntu/sar_env/bin/python -m app.workers.runner --class gpu
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

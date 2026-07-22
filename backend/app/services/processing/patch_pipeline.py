@@ -122,7 +122,11 @@ def _build_channels(raw_patch: np.ndarray) -> np.ndarray:
 
     - 1 band  -> replicate single dB-normalized channel x3.
     - 2 bands -> VV, VH, VV-VH combination (computed in dB space, then
-                 each channel independently normalized to 0-255).
+      each channel independently normalized to 0-255).
+    - 3+ bands -> display-encoded RGB(A) input.  Preserve the first three
+      channels instead of applying the linear-SAR dB conversion.  Generic
+      four-band TIFFs are commonly RGB plus alpha; treating their 0..255
+      display values as linear backscatter clips every pixel to white.
     """
     band_count = raw_patch.shape[0]
 
@@ -145,8 +149,17 @@ def _build_channels(raw_patch: np.ndarray) -> np.ndarray:
 
         return np.stack([vv_norm, vh_norm, ratio_norm], axis=-1)
 
+    if band_count >= 3:
+        # This is the generic-image path, not a calibrated SAR measurement
+        # path.  Alpha and any additional channels are deliberately excluded.
+        # Do not contrast-stretch here: the uploader may already have supplied
+        # a deliberate SAR visualization, and preserving its intensity mapping
+        # gives the reviewer and SARChat the same visible evidence.
+        rgb = np.clip(raw_patch[:3], 0, 255).astype(np.uint8, copy=False)
+        return np.moveaxis(rgb, 0, -1)
+
     raise ShapeMismatchError(
-        f"Expected 1 or 2 bands per Feature 1's contract, got {band_count}."
+        f"Expected at least 1 raster band, got {band_count}."
     )
 
 

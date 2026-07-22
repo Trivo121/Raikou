@@ -1,14 +1,16 @@
 [Unit]
 Description=SAR RAG FastAPI backend
-After=network-online.target sarchat-vllm.service
+After=network-online.target
 Wants=network-online.target
-Requires=sarchat-vllm.service
 
 [Service]
 Type=simple
 User=ubuntu
 WorkingDirectory=/home/ubuntu/backend
+EnvironmentFile=-/home/ubuntu/backend/.env
 Environment=PYTHONUNBUFFERED=1
+Environment=ENVIRONMENT=production
+Environment=ENABLE_LEGACY_SESSION_API=false
 ExecStart=/home/ubuntu/sar_env/bin/python -m uvicorn main:app --host 0.0.0.0 --port 8000
 Restart=always
 RestartSec=10
