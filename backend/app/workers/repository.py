@@ -44,7 +44,7 @@ class WorkerRepository:
 
     @contextmanager
     def transaction(self) -> Iterator[psycopg.Connection[dict[str, Any]]]:
-        with psycopg.connect(self._dsn, row_factory=dict_row) as connection:
+        with psycopg.connect(self._dsn, row_factory=dict_row, connect_timeout=10) as connection:
             with connection.transaction():
                 yield connection
 
