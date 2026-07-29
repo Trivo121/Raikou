@@ -43,8 +43,18 @@ class WorkerRepository:
         self._dsn = dsn or settings.require_worker_database_url()
 
     @contextmanager
-    def transaction(self) -> Iterator[psycopg.Connection[dict[str, Any]]]:
+    def connection(self) -> Iterator[psycopg.Connection[dict[str, Any]]]:
+        """One physical connection for a caller to reuse across several
+        transactions. Repeatedly calling ``transaction()`` inside a tight
+        per-item loop (hundreds to a thousand patches) opens that many fresh
+        connections against the pooler; a hung pooler handoff on any single
+        one of them then blocks the whole loop indefinitely."""
         with psycopg.connect(self._dsn, row_factory=dict_row, connect_timeout=10) as connection:
+            yield connection
+
+    @contextmanager
+    def transaction(self) -> Iterator[psycopg.Connection[dict[str, Any]]]:
+        with self.connection() as connection:
             with connection.transaction():
                 yield connection
 
@@ -402,9 +412,26 @@ class WorkerRepository:
     def upsert_artifact(
         self, task: dict[str, Any], *, kind: str, logical_key: str, storage_bucket: str,
         storage_key: str, content_type: str, size_bytes: int, checksum_sha256: str | None,
-        metadata: dict[str, Any] | None = None,
+        metadata: dict[str, Any] | None = None, connection: psycopg.Connection[dict[str, Any]] | None = None,
     ) -> dict[str, Any]:
-        with self.transaction() as connection, connection.cursor() as cursor:
+        if connection is None:
+            with self.transaction() as connection:
+                return self._upsert_artifact(connection, task, kind=kind, logical_key=logical_key,
+                                              storage_bucket=storage_bucket, storage_key=storage_key,
+                                              content_type=content_type, size_bytes=size_bytes,
+                                              checksum_sha256=checksum_sha256, metadata=metadata)
+        with connection.transaction():
+            return self._upsert_artifact(connection, task, kind=kind, logical_key=logical_key,
+                                          storage_bucket=storage_bucket, storage_key=storage_key,
+                                          content_type=content_type, size_bytes=size_bytes,
+                                          checksum_sha256=checksum_sha256, metadata=metadata)
+
+    def _upsert_artifact(
+        self, connection: psycopg.Connection[dict[str, Any]], task: dict[str, Any], *, kind: str, logical_key: str,
+        storage_bucket: str, storage_key: str, content_type: str, size_bytes: int, checksum_sha256: str | None,
+        metadata: dict[str, Any] | None,
+    ) -> dict[str, Any]:
+        with connection.cursor() as cursor:
             cursor.execute(
                 """
                 insert into public.scene_artifacts (
@@ -481,8 +508,26 @@ class WorkerRepository:
     def upsert_patch(
         self, task: dict[str, Any], *, patch_id: UUID, patch_key: str, row_start: int, col_start: int,
         patch_size: int, source_artifact_id: str | UUID | None, preview_artifact_id: str | UUID | None = None,
+        connection: psycopg.Connection[dict[str, Any]] | None = None,
     ) -> None:
-        with self.transaction() as connection, connection.cursor() as cursor:
+        if connection is None:
+            with self.transaction() as connection:
+                self._upsert_patch(connection, task, patch_id=patch_id, patch_key=patch_key, row_start=row_start,
+                                    col_start=col_start, patch_size=patch_size, source_artifact_id=source_artifact_id,
+                                    preview_artifact_id=preview_artifact_id)
+            return
+        with connection.transaction():
+            self._upsert_patch(connection, task, patch_id=patch_id, patch_key=patch_key, row_start=row_start,
+                                col_start=col_start, patch_size=patch_size, source_artifact_id=source_artifact_id,
+                                preview_artifact_id=preview_artifact_id)
+
+    @staticmethod
+    def _upsert_patch(
+        connection: psycopg.Connection[dict[str, Any]], task: dict[str, Any], *, patch_id: UUID, patch_key: str,
+        row_start: int, col_start: int, patch_size: int, source_artifact_id: str | UUID | None,
+        preview_artifact_id: str | UUID | None,
+    ) -> None:
+        with connection.cursor() as cursor:
             cursor.execute(
                 """
                 insert into public.patches (

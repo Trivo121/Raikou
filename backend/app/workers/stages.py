@@ -22,6 +22,7 @@ import zipfile
 
 import numpy as np
 from PIL import Image
+import psycopg
 import rasterio
 from rasterio.enums import Resampling
 
@@ -140,6 +141,7 @@ class M3Pipeline:
     def _persist_file(
         self, task: dict[str, Any], *, kind: str, logical_key: str, path: Path,
         content_type: str, metadata: dict[str, Any] | None = None,
+        connection: psycopg.Connection[dict[str, Any]] | None = None,
     ) -> dict[str, Any]:
         key = self._artifact_key(task, logical_key, path.name)
         try:
@@ -156,6 +158,7 @@ class M3Pipeline:
             size_bytes=object_info.size_bytes,
             checksum_sha256=self._sha256_file(path),
             metadata=metadata,
+            connection=connection,
         )
 
     def _materialize_sources(self, task: dict[str, Any]) -> tuple[Path, list[dict[str, Any]], list[Path], Path | None]:
@@ -287,22 +290,28 @@ class M3Pipeline:
         patch_count = 0
         try:
             iterator = extract_and_preprocess_patches(str(vrt_path), str(task["scene_id"]), metadata)
-            for patch in iterator:
-                patch_id, patch_key = self._patch_identity(task, patch.row_start, patch.col_start)
-                preview_artifact_id = None
-                if preview_count < settings.M3_MAX_PATCH_PREVIEWS:
-                    preview_path = self._workdir(task) / f"patch-{patch_id}.jpg"
-                    Image.fromarray(patch.array).save(preview_path, format="JPEG", quality=85)
-                    preview = self._persist_file(task, kind="patch_preview", logical_key=f"patch-preview:{patch_id}",
-                                                 path=preview_path, content_type="image/jpeg",
-                                                 metadata={"row_start": patch.row_start, "col_start": patch.col_start})
-                    preview_artifact_id = str(preview["id"])
-                    preview_count += 1
-                self.repository.upsert_patch(task, patch_id=patch_id, patch_key=patch_key,
-                                             row_start=patch.row_start, col_start=patch.col_start,
-                                             patch_size=PATCH_SIZE, source_artifact_id=source_artifact_id,
-                                             preview_artifact_id=preview_artifact_id)
-                patch_count += 1
+            # One connection is reused for every patch in this scene instead of
+            # opening a fresh one per patch (up to ~1000): that per-patch churn
+            # was what put the pooler under enough pressure to hang a handoff
+            # indefinitely and freeze the whole worker.
+            with self.repository.connection() as connection:
+                for patch in iterator:
+                    patch_id, patch_key = self._patch_identity(task, patch.row_start, patch.col_start)
+                    preview_artifact_id = None
+                    if preview_count < settings.M3_MAX_PATCH_PREVIEWS:
+                        preview_path = self._workdir(task) / f"patch-{patch_id}.jpg"
+                        Image.fromarray(patch.array).save(preview_path, format="JPEG", quality=85)
+                        preview = self._persist_file(task, kind="patch_preview", logical_key=f"patch-preview:{patch_id}",
+                                                     path=preview_path, content_type="image/jpeg",
+                                                     metadata={"row_start": patch.row_start, "col_start": patch.col_start},
+                                                     connection=connection)
+                        preview_artifact_id = str(preview["id"])
+                        preview_count += 1
+                    self.repository.upsert_patch(task, patch_id=patch_id, patch_key=patch_key,
+                                                 row_start=patch.row_start, col_start=patch.col_start,
+                                                 patch_size=PATCH_SIZE, source_artifact_id=source_artifact_id,
+                                                 preview_artifact_id=preview_artifact_id, connection=connection)
+                    patch_count += 1
         except (OSError, ValueError, rasterio.errors.RasterioError) as exc:
             raise UserFacingTaskError("PATCH_TILING_FAILED", "Patch extraction failed for this scene.") from exc
         if patch_count == 0:
