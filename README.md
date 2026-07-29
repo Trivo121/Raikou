@@ -67,25 +67,36 @@ Every answer and workspace card should make its evidence class clear.
 
 ```mermaid
 flowchart TB
-    analyst["Authenticated analyst"] --> web["React + Vite workspace"]
-    web -->|"Supabase session JWT"| api["FastAPI control plane"]
-    web -->|"short-lived multipart URLs"| objectstore[("Private S3 / MinIO")]
+    classDef client fill:#f9f9f9,stroke:#333,stroke-width:2px;
+    classDef api fill:#e1f5fe,stroke:#0288d1,stroke-width:2px;
+    classDef storage fill:#fff3e0,stroke:#f57c00,stroke-width:2px;
+    classDef worker fill:#e8f5e9,stroke:#388e3c,stroke-width:2px;
+    classDef external fill:#f3e5f5,stroke:#7b1fa2,stroke-width:2px;
 
-    api --> auth["Supabase Auth"]
-    api --> postgres[("Supabase PostgreSQL")]
-    api --> redis[("Redis: cache + Streams")]
-    api --> qdrant[("Qdrant: 768-d patch vectors")]
-    api --> vllm["Private vLLM / SARChat"]
+    analyst["👤 Authenticated analyst"]:::client --> web["💻 React + Vite workspace"]:::client
+    web -->|"Supabase session JWT"| api["⚡ FastAPI control plane"]:::api
+    web -->|"short-lived multipart URLs"| objectstore[("📦 Private S3 / MinIO")]:::storage
 
-    dispatcher["PostgreSQL outbox dispatcher"] -->|"minimal task ID"| redis
-    redis --> cpu["CPU / IO worker"]
-    redis --> gpu["GPU embedding worker"]
-    cpu --> objectstore
-    cpu --> postgres
-    cpu --> qdrant
-    cpu --> vllm
-    gpu --> sarclip["SARCLIP GeoRS ViT-L/14"]
-    gpu --> qdrant
+    subgraph "Backend Services & Storage"
+        api --> auth["🔐 Supabase Auth"]:::external
+        api --> postgres[("🐘 Supabase PostgreSQL")]:::storage
+        api --> redis[("🟥 Redis: cache + Streams")]:::storage
+        api --> qdrant[("🎯 Qdrant: 768-d patch vectors")]:::storage
+        api --> vllm["🧠 Private vLLM / SARChat"]:::worker
+    end
+
+    subgraph "Asynchronous Workers"
+        dispatcher["⏱️ PostgreSQL outbox dispatcher"]:::api -->|"minimal task ID"| redis
+        redis --> cpu["⚙️ CPU / IO worker"]:::worker
+        redis --> gpu["🚀 GPU embedding worker"]:::worker
+        
+        cpu --> objectstore
+        cpu --> postgres
+        cpu --> qdrant
+        cpu --> vllm
+        gpu --> sarclip["🖼️ SARCLIP GeoRS ViT-L/14"]:::worker
+        gpu --> qdrant
+    end
 ```
 
 ### Responsibility boundaries
@@ -109,13 +120,28 @@ flowchart TB
 
 The browser creates a project and an owned scene. A scene has a name, free-form metadata, lifecycle status, extracted sensor/acquisition/polarization metadata, source-artifact reference, and timestamps.
 
-```text
-draft → uploading → uploaded → queued → processing → ready
-                         │                     │
-                         └─────────────────────┴→ failed / cancelled
-
-ready → reprocess → queued
-ready / failed / cancelled → deleting → deleted
+```mermaid
+stateDiagram-v2
+    direction LR
+    [*] --> draft: Create
+    draft --> uploading: Start Upload
+    uploading --> uploaded: Complete Parts
+    uploaded --> queued: Dispatch Job
+    queued --> processing: Claim Task
+    processing --> ready: Finalize
+    
+    uploading --> failed: Error
+    processing --> failed: Error
+    uploading --> cancelled: Abort
+    processing --> cancelled: Abort
+    
+    ready --> queued: Reprocess (Manual)
+    
+    ready --> deleting: Delete Request
+    failed --> deleting: Delete Request
+    cancelled --> deleting: Delete Request
+    deleting --> deleted: Cleanup Finished
+    deleted --> [*]
 ```
 
 The authoritative lifecycle is PostgreSQL. Frontend state is disposable and is reconstructed from authenticated APIs after a page reload.
@@ -123,6 +149,35 @@ The authoritative lifecycle is PostgreSQL. Frontend state is disposable and is r
 ### 2. Direct-to-object-storage upload
 
 The upload control plane deliberately handles metadata, not raster bytes:
+
+```mermaid
+sequenceDiagram
+    participant B as Browser
+    participant API as FastAPI
+    participant DB as PostgreSQL
+    participant S3 as S3/MinIO
+    participant W as Dispatcher/Worker
+
+    B->>API: POST /uploads/initiate (metadata)
+    API->>DB: Validate & Create Upload Plan
+    DB-->>API: Plan ID
+    API-->>B: Upload Plan
+
+    loop For each chunk
+        B->>API: POST /parts/sign (Plan ID, Part #)
+        API-->>B: Short-lived S3 URL
+        B->>S3: PUT Chunk Bytes directly
+        S3-->>B: ETag (Success)
+    end
+
+    B->>API: POST /uploads/complete (ETags)
+    API->>S3: Verify objects & checksums
+    API->>DB: Persist Artifacts & Write Outbox Task
+    API-->>B: Upload Complete
+    
+    DB->>W: Emit Task (via Redis Streams)
+    W->>W: Process Task
+```
 
 1. The browser calls `POST /api/v1/uploads/initiate` with a generated `client_request_id`, project ID, scene ID, and up to three file descriptors.
 2. FastAPI validates ownership, allowed filenames/types, declared sizes, and creates one expiring database-backed upload plan atomically.
@@ -135,6 +190,33 @@ Upload recovery is intentional. Repeating the exact initiation request returns t
 ### 3. Durable processing stages
 
 The M3 worker pipeline is idempotent by scene and stage. Each stage re-materializes its inputs from private object storage, so worker scratch storage is disposable.
+
+```mermaid
+flowchart TD
+    classDef cpu fill:#e8f5e9,stroke:#388e3c,stroke-width:2px;
+    classDef gpu fill:#fff3e0,stroke:#f57c00,stroke-width:2px;
+    classDef cleanup fill:#ffebee,stroke:#d32f2f,stroke-width:2px;
+
+    s1["1. validate_upload (CPU)"]:::cpu --> s2["2. extract_metadata (CPU)"]:::cpu
+    s2 --> s3["3. build_vrt (CPU)"]:::cpu
+    s3 --> s4["4. build_overview (CPU)"]:::cpu
+    s4 --> s5["5. tile_patches (CPU)"]:::cpu
+    s5 --> s6["6. embed_patches (GPU)"]:::gpu
+    s6 --> s7["7. index_vectors (CPU)"]:::cpu
+    s7 --> s8["8. build_evidence (CPU)"]:::cpu
+    s8 --> s9["9. finalize (CPU)"]:::cpu
+    
+    c["— cleanup (CPU)"]:::cleanup
+
+    subgraph "Main Outputs"
+        s1 -.-> o1[Safe source]
+        s4 -.-> o4[Overview image artifact]
+        s5 -.-> o5[Patch rows & previews]
+        s6 -.-> o6[Embedding manifest]
+        s7 -.-> o7[Qdrant points & ready patches]
+        s8 -.-> o8[Scene record & optional model caption]
+    end
+```
 
 | Order | Stage | Execution class | Main output |
 | --- | --- | --- | --- |
