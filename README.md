@@ -66,12 +66,13 @@ Every answer and workspace card should make its evidence class clear.
 ## Architecture
 
 ```mermaid
+%%{init: {'theme': 'dark', 'themeVariables': { 'fontFamily': 'ui-sans-serif, system-ui, -apple-system, sans-serif'}}}%%
 flowchart TB
-    classDef client fill:#f9f9f9,stroke:#333,stroke-width:2px;
-    classDef api fill:#e1f5fe,stroke:#0288d1,stroke-width:2px;
-    classDef storage fill:#fff3e0,stroke:#f57c00,stroke-width:2px;
-    classDef worker fill:#e8f5e9,stroke:#388e3c,stroke-width:2px;
-    classDef external fill:#f3e5f5,stroke:#7b1fa2,stroke-width:2px;
+    classDef client fill:#1e1e2e,stroke:#cba6f7,stroke-width:2px,color:#cdd6f4;
+    classDef api fill:#1e1e2e,stroke:#89b4fa,stroke-width:2px,color:#cdd6f4;
+    classDef storage fill:#1e1e2e,stroke:#f9e2af,stroke-width:2px,color:#cdd6f4;
+    classDef worker fill:#1e1e2e,stroke:#a6e3a1,stroke-width:2px,color:#cdd6f4;
+    classDef external fill:#1e1e2e,stroke:#f38ba8,stroke-width:2px,color:#cdd6f4;
 
     analyst["👤 Authenticated analyst"]:::client --> web["💻 React + Vite workspace"]:::client
     web -->|"Supabase session JWT"| api["⚡ FastAPI control plane"]:::api
@@ -121,6 +122,7 @@ flowchart TB
 The browser creates a project and an owned scene. A scene has a name, free-form metadata, lifecycle status, extracted sensor/acquisition/polarization metadata, source-artifact reference, and timestamps.
 
 ```mermaid
+%%{init: {'theme': 'dark', 'themeVariables': { 'fontFamily': 'ui-sans-serif, system-ui, -apple-system, sans-serif'}}}%%
 stateDiagram-v2
     direction LR
     [*] --> draft: Create
@@ -151,6 +153,7 @@ The authoritative lifecycle is PostgreSQL. Frontend state is disposable and is r
 The upload control plane deliberately handles metadata, not raster bytes:
 
 ```mermaid
+%%{init: {'theme': 'dark', 'themeVariables': { 'fontFamily': 'ui-sans-serif, system-ui, -apple-system, sans-serif'}}}%%
 sequenceDiagram
     participant B as Browser
     participant API as FastAPI
@@ -192,10 +195,11 @@ Upload recovery is intentional. Repeating the exact initiation request returns t
 The M3 worker pipeline is idempotent by scene and stage. Each stage re-materializes its inputs from private object storage, so worker scratch storage is disposable.
 
 ```mermaid
+%%{init: {'theme': 'dark', 'themeVariables': { 'fontFamily': 'ui-sans-serif, system-ui, -apple-system, sans-serif'}}}%%
 flowchart TD
-    classDef cpu fill:#e8f5e9,stroke:#388e3c,stroke-width:2px;
-    classDef gpu fill:#fff3e0,stroke:#f57c00,stroke-width:2px;
-    classDef cleanup fill:#ffebee,stroke:#d32f2f,stroke-width:2px;
+    classDef cpu fill:#1e1e2e,stroke:#89b4fa,stroke-width:2px,color:#cdd6f4;
+    classDef gpu fill:#1e1e2e,stroke:#f9e2af,stroke-width:2px,color:#cdd6f4;
+    classDef cleanup fill:#1e1e2e,stroke:#f38ba8,stroke-width:2px,color:#cdd6f4;
 
     s1["1. validate_upload (CPU)"]:::cpu --> s2["2. extract_metadata (CPU)"]:::cpu
     s2 --> s3["3. build_vrt (CPU)"]:::cpu
