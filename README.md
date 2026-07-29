@@ -55,13 +55,69 @@ Raikou is therefore **not** an arbitrary-object recognizer. It does not treat a 
 
 Every answer and workspace card should make its evidence class clear.
 
-| Evidence class | Source | What it can support | What it cannot support |
-| --- | --- | --- | --- |
-| Acquisition metadata | Source raster/archive and durable scene row | Sensor, acquisition time, polarization, CRS, raster geometry | Semantic scene claims |
-| Scene context | Conservative processing heuristic | Water-dominant, land-dominant, or mixed/indeterminate context | Vegetation or a calibrated land-cover class |
-| Validated detector evidence | Approved detector JSON sidecar | The detector's class, count, confidence, bounds, crop, and location | Proof that all objects were found; claims outside its trained taxonomy |
-| Model observation | SARChat caption/narration | Uncertain descriptions of visible SAR returns and geometry | Verified objects, object counts, new coordinates, activity, intent, or land-cover classes |
-| SARCLIP retrieval | Qdrant similarity search over authorized patches | Supporting patch, similar visual evidence, location-oriented inspection | Object detection, counts, absence, or semantic certainty |
+|
+ Evidence class 
+|
+ Source 
+|
+ What it can support 
+|
+ What it cannot support 
+|
+|
+---
+|
+---
+|
+---
+|
+---
+|
+|
+ Acquisition metadata 
+|
+ Source raster/archive and durable scene row 
+|
+ Sensor, acquisition time, polarization, CRS, raster geometry 
+|
+ Semantic scene claims 
+|
+|
+ Scene context 
+|
+ Conservative processing heuristic 
+|
+ Water-dominant, land-dominant, or mixed/indeterminate context 
+|
+ Vegetation or a calibrated land-cover class 
+|
+|
+ Validated detector evidence 
+|
+ Approved detector JSON sidecar 
+|
+ The detector's class, count, confidence, bounds, crop, and location 
+|
+ Proof that all objects were found; claims outside its trained taxonomy 
+|
+|
+ Model observation 
+|
+ SARChat caption/narration 
+|
+ Uncertain descriptions of visible SAR returns and geometry 
+|
+ Verified objects, object counts, new coordinates, activity, intent, or land-cover classes 
+|
+|
+ SARCLIP retrieval 
+|
+ Qdrant similarity search over authorized patches 
+|
+ Supporting patch, similar visual evidence, location-oriented inspection 
+|
+ Object detection, counts, absence, or semantic certainty 
+|
 
 ## Architecture
 
@@ -102,18 +158,66 @@ flowchart TB
 
 ### Responsibility boundaries
 
-| Component | Responsibility |
-| --- | --- |
-| React client | Auth state, project/workspace UX, direct multipart upload, progress polling, search cards, NDJSON chat rendering, short-lived preview display |
-| FastAPI | Authentication/ownership checks, API contracts, upload plans, signed URLs, workspace assembly, scoped retrieval, cache coordination, chat orchestration, metrics/readiness |
-| Supabase Auth + PostgreSQL | User identity and durable source of truth for projects, scenes, jobs, artifacts, patches, evidence records, conversations, and messages |
-| Private S3 or MinIO | Original uploaded files and derived artifacts; the browser receives narrow, expiring URLs rather than storage credentials |
-| Redis | Disposable, tenant-scoped RAG cache and Redis Streams transport for worker wake-ups; never the product database |
-| PostgreSQL outbox | Authoritative task lifecycle; a Redis outage cannot silently lose a processing job |
-| CPU worker | Archive/raster validation, VRT/overview creation, patch/artifact persistence, Qdrant indexing, scene record, caption enrichment, cleanup |
-| GPU worker | SARCLIP patch embedding; one worker process per physical GPU is the safe initial topology |
-| Qdrant | Cosine similarity retrieval of SARCLIP patch vectors, always filtered by owner/project and optionally scene |
-| vLLM / SARChat | Overview captioning and constrained, evidence-grounded scene narration through an OpenAI-compatible local API |
+|
+ Component 
+|
+ Responsibility 
+|
+|
+---
+|
+---
+|
+|
+ React client 
+|
+ Auth state, project/workspace UX, direct multipart upload, progress polling, search cards, NDJSON chat rendering, short-lived preview display 
+|
+|
+ FastAPI 
+|
+ Authentication/ownership checks, API contracts, upload plans, signed URLs, workspace assembly, scoped retrieval, cache coordination, chat orchestration, metrics/readiness 
+|
+|
+ Supabase Auth + PostgreSQL 
+|
+ User identity and durable source of truth for projects, scenes, jobs, artifacts, patches, evidence records, conversations, and messages 
+|
+|
+ Private S3 or MinIO 
+|
+ Original uploaded files and derived artifacts; the browser receives narrow, expiring URLs rather than storage credentials 
+|
+|
+ Redis 
+|
+ Disposable, tenant-scoped RAG cache and Redis Streams transport for worker wake-ups; never the product database 
+|
+|
+ PostgreSQL outbox 
+|
+ Authoritative task lifecycle; a Redis outage cannot silently lose a processing job 
+|
+|
+ CPU worker 
+|
+ Archive/raster validation, VRT/overview creation, patch/artifact persistence, Qdrant indexing, scene record, caption enrichment, cleanup 
+|
+|
+ GPU worker 
+|
+ SARCLIP patch embedding; one worker process per physical GPU is the safe initial topology 
+|
+|
+ Qdrant 
+|
+ Cosine similarity retrieval of SARCLIP patch vectors, always filtered by owner/project and optionally scene 
+|
+|
+ vLLM / SARChat 
+|
+ Overview captioning and constrained, evidence-grounded scene narration through an OpenAI-compatible local API 
+|
 
 ## End-to-end scene lifecycle
 
@@ -222,18 +326,116 @@ flowchart TD
     end
 ```
 
-| Order | Stage | Execution class | Main output |
-| --- | --- | --- | --- |
-| 1 | `validate_upload` | CPU | Safe, supported source material |
-| 2 | `extract_metadata` | CPU | Raster/SAR metadata |
-| 3 | `build_vrt` | CPU | Readable raster VRT |
-| 4 | `build_overview` | CPU | Full-scene overview image artifact |
-| 5 | `tile_patches` | CPU | Patch rows and bounded preview artifacts |
-| 6 | `embed_patches` | GPU | SARCLIP embedding manifest |
-| 7 | `index_vectors` | CPU | Scoped Qdrant points and ready patch rows |
-| 8 | `build_evidence` | CPU | Scene record, detector validation, optional model caption |
-| 9 | `finalize` | CPU | Scene reaches `ready` after durable-artifact/vector checks |
-| — | `cleanup` | CPU | Vectors and derived/source state removed according to deletion scope |
+|
+ Order 
+|
+ Stage 
+|
+ Execution class 
+|
+ Main output 
+|
+|
+---
+|
+---
+|
+---
+|
+---
+|
+|
+ 1 
+|
+`validate_upload`
+|
+ CPU 
+|
+ Safe, supported source material 
+|
+|
+ 2 
+|
+`extract_metadata`
+|
+ CPU 
+|
+ Raster/SAR metadata 
+|
+|
+ 3 
+|
+`build_vrt`
+|
+ CPU 
+|
+ Readable raster VRT 
+|
+|
+ 4 
+|
+`build_overview`
+|
+ CPU 
+|
+ Full-scene overview image artifact 
+|
+|
+ 5 
+|
+`tile_patches`
+|
+ CPU 
+|
+ Patch rows and bounded preview artifacts 
+|
+|
+ 6 
+|
+`embed_patches`
+|
+ GPU 
+|
+ SARCLIP embedding manifest 
+|
+|
+ 7 
+|
+`index_vectors`
+|
+ CPU 
+|
+ Scoped Qdrant points and ready patch rows 
+|
+|
+ 8 
+|
+`build_evidence`
+|
+ CPU 
+|
+ Scene record, detector validation, optional model caption 
+|
+|
+ 9 
+|
+`finalize`
+|
+ CPU 
+|
+ Scene reaches 
+`ready`
+ after durable-artifact/vector checks 
+|
+|
+ — 
+|
+`cleanup`
+|
+ CPU 
+|
+ Vectors and derived/source state removed according to deletion scope 
+|
 
 The default stream names are separated from cache keys:
 
@@ -257,15 +459,69 @@ The backend repeats browser-side checks. It validates filenames/MIME declaration
 
 `backend/app/services/processing/patch_pipeline.py` establishes the visual representation shared by embedding, preview, supporting crops, and model inspection.
 
-| Parameter | Current value | Meaning |
-| --- | ---: | --- |
-| Patch size | 224 px | Direct ViT-L/14-sized patch cut; no incomplete edge padding |
-| Stride | 112 px | 50% overlap between candidate patches |
-| No-data discard threshold | >40% zeros | Patch is dropped before embedding |
-| SAR dB transform | `10 * log10(value + 1)` | Applied for one/two-band power-like SAR inputs |
-| dB clip range | -25 dB to +5 dB | Linearly scaled to 8-bit display channels |
-| Overview target | 1024×1024 px | Decimated broad-scene display image |
-| Overview split threshold | 8192 px | Larger scenes can produce NW/NE/SW/SE overview sections |
+|
+ Parameter 
+|
+ Current value 
+|
+ Meaning 
+|
+|
+---
+|
+---:
+|
+---
+|
+|
+ Patch size 
+|
+ 224 px 
+|
+ Direct ViT-L/14-sized patch cut; no incomplete edge padding 
+|
+|
+ Stride 
+|
+ 112 px 
+|
+ 50% overlap between candidate patches 
+|
+|
+ No-data discard threshold 
+|
+ >40% zeros 
+|
+ Patch is dropped before embedding 
+|
+|
+ SAR dB transform 
+|
+`10 * log10(value + 1)`
+|
+ Applied for one/two-band power-like SAR inputs 
+|
+|
+ dB clip range 
+|
+ -25 dB to +5 dB 
+|
+ Linearly scaled to 8-bit display channels 
+|
+|
+ Overview target 
+|
+ 1024×1024 px 
+|
+ Decimated broad-scene display image 
+|
+|
+ Overview split threshold 
+|
+ 8192 px 
+|
+ Larger scenes can produce NW/NE/SW/SE overview sections 
+|
 
 Band handling is explicit:
 
@@ -287,16 +543,61 @@ Private image previews are granted only on request, only for available overview/
 
 Raikou uses SARCLIP through OpenCLIP as a **dual encoder** for patch/text similarity:
 
-| Property | Runtime behaviour |
-| --- | --- |
-| Architecture | OpenCLIP `ViT-L-14` |
-| Configured checkpoint | `SARCLIP-GeoRS-ViT-L-14.pt` |
-| Other repository checkpoint | `SARCLIP-GeoRS-ViT-B-32.pt` is present but is not the configured V1 retrieval encoder |
-| Device | CUDA when available unless `SARCLIP_DEVICE` is explicitly set; CPU fallback is supported for development |
-| Batch size | `SARCLIP_BATCH_SIZE`, default 8 in backend settings (compose/example deployment may override it) |
-| Vector shape | 768 floating-point values |
-| Normalization | Image and text vectors are L2-normalized before cosine search |
-| Index | One unnamed 768-dimensional cosine vector per patch in Qdrant |
+|
+ Property 
+|
+ Runtime behaviour 
+|
+|
+---
+|
+---
+|
+|
+ Architecture 
+|
+ OpenCLIP 
+`ViT-L-14`
+|
+|
+ Configured checkpoint 
+|
+`SARCLIP-GeoRS-ViT-L-14.pt`
+|
+|
+ Other repository checkpoint 
+|
+`SARCLIP-GeoRS-ViT-B-32.pt`
+ is present but is not the configured V1 retrieval encoder 
+|
+|
+ Device 
+|
+ CUDA when available unless 
+`SARCLIP_DEVICE`
+ is explicitly set; CPU fallback is supported for development 
+|
+|
+ Batch size 
+|
+`SARCLIP_BATCH_SIZE`
+, default 8 in backend settings (compose/example deployment may override it) 
+|
+|
+ Vector shape 
+|
+ 768 floating-point values 
+|
+|
+ Normalization 
+|
+ Image and text vectors are L2-normalized before cosine search 
+|
+|
+ Index 
+|
+ One unnamed 768-dimensional cosine vector per patch in Qdrant 
+|
 
 SARCLIP loads once per worker process through a singleton. It encodes text queries and preprocessed patches into the same embedding space. It is useful for questions such as “show a visually similar patch”, “find the bright elongated return”, or “where is a likely linear structure?”, but **not** for establishing object classes, object counts, land cover, or absence.
 
@@ -334,19 +635,101 @@ Model files are server-side assets and must not be exposed through the frontend.
 
 ## RAG and grounded chat
 
+```mermaid
+%%{init: {'theme': 'dark', 'themeVariables': { 'fontFamily': 'ui-sans-serif, system-ui, -apple-system, sans-serif'}}}%%
+flowchart TD
+    classDef user fill:#1e1e2e,stroke:#cba6f7,stroke-width:2px,color:#cdd6f4;
+    classDef router fill:#1e1e2e,stroke:#89b4fa,stroke-width:2px,color:#cdd6f4;
+    classDef data fill:#1e1e2e,stroke:#f9e2af,stroke-width:2px,color:#cdd6f4;
+    classDef embed fill:#1e1e2e,stroke:#f38ba8,stroke-width:2px,color:#cdd6f4;
+    classDef llm fill:#1e1e2e,stroke:#a6e3a1,stroke-width:2px,color:#cdd6f4;
+
+    q["❓ User Question"]:::user --> route{"🚦 Intent Router"}:::router
+    
+    route -->|Detector / Count / Presence| facts["📊 Validated Detector Facts"]:::data
+    route -->|Visual Evidence / Similarity| embed["🧠 SARCLIP Encoding"]:::embed
+    route -->|Description / Context| context["🗺️ Scene Record & Overview"]:::data
+    
+    embed --> qdrant[("🎯 Qdrant Vector Search")]:::data
+    qdrant --> patches["🖼️ Retrieved SAR Patches"]:::data
+    
+    facts --> prompt["📝 Bounded RAG Prompt"]:::router
+    context --> prompt
+    patches --> prompt
+    
+    prompt --> vllm["🤖 vLLM / SARChat"]:::llm
+    vllm --> answer["✅ Grounded Answer & Citations"]:::llm
+```
+
 ### Why this is not naive RAG
 
 Naive RAG embeds the question, retrieves the nearest patch, and asks a language model to answer. For SAR, that produces exactly the failure Raikou is designed to avoid: a patch visually similar to a bridge being presented as evidence for vegetation, buildings, or a count.
 
 Raikou's M5 chat is **scene-record first**. It routes a question according to the evidence needed to answer it before optional vector retrieval:
 
-| Question intent | Example | Primary authority | Is Qdrant retrieval required? |
-| --- | --- | --- | --- |
-| Environmental context | “Is there vegetation?” | Calibrated segmentation if available; otherwise a limitation plus labelled land/water heuristic | No |
-| Detector presence/count | “Are there ships?” / “How many bridges?” | Validated detector facts in the scene record | No |
-| Detector location | “Where is the bridge?” | Detector record for class/location; patch can support inspection | Optional |
-| Scene description | “Describe the scene” / “What is happening?” | Scene record, metadata, overview, deliberate quadrants, representative evidence | No semantic patch search required |
-| Visual evidence | “Show a patch like this” / “Find a bright elongated return” | Authorized SARCLIP patches | Yes |
+|
+ Question intent 
+|
+ Example 
+|
+ Primary authority 
+|
+ Is Qdrant retrieval required? 
+|
+|
+---
+|
+---
+|
+---
+|
+---
+|
+|
+ Environmental context 
+|
+ “Is there vegetation?” 
+|
+ Calibrated segmentation if available; otherwise a limitation plus labelled land/water heuristic 
+|
+ No 
+|
+|
+ Detector presence/count 
+|
+ “Are there ships?” / “How many bridges?” 
+|
+ Validated detector facts in the scene record 
+|
+ No 
+|
+|
+ Detector location 
+|
+ “Where is the bridge?” 
+|
+ Detector record for class/location; patch can support inspection 
+|
+ Optional 
+|
+|
+ Scene description 
+|
+ “Describe the scene” / “What is happening?” 
+|
+ Scene record, metadata, overview, deliberate quadrants, representative evidence 
+|
+ No semantic patch search required 
+|
+|
+ Visual evidence 
+|
+ “Show a patch like this” / “Find a bright elongated return” 
+|
+ Authorized SARCLIP patches 
+|
+ Yes 
+|
 
 For a scene-scoped conversation, the service loads the durable scene record before it considers a text-to-patch search. Project-scoped chat has no single canonical scene record, so scoped retrieval can first select candidate scenes.
 
@@ -390,11 +773,31 @@ Each citation carries source type/ID, scene, optional artifact/patch IDs, patch 
 
 Redis is an optimization, never a source of truth. After ownership validation, M5 can cache:
 
-| Cached value | Default TTL |
-| --- | ---: |
-| Query embedding | 3,600 seconds |
-| Qdrant IDs and scores | 300 seconds |
-| Bounded authorized RAG-context projection | 120 seconds |
+|
+ Cached value 
+|
+ Default TTL 
+|
+|
+---
+|
+---:
+|
+|
+ Query embedding 
+|
+ 3,600 seconds 
+|
+|
+ Qdrant IDs and scores 
+|
+ 300 seconds 
+|
+|
+ Bounded authorized RAG-context projection 
+|
+ 120 seconds 
+|
 
 Cache keys contain only the validated owner/project/optional-scene scope, normalized query/filter digest, SARCLIP/SARChat version, Qdrant index version, and a project cache-generation value. They never contain raw bearer tokens, raw query text, prompts, signed URLs, object bytes, database rows, or stream frames. Evidence/lifecycle mutations advance project cache generation and invalidate derived keys.
 
@@ -447,17 +850,63 @@ Class-aware non-maximum suppression occurs in global scene pixel coordinates aft
 
 ### Backend stack
 
-| Area | Technology |
-| --- | --- |
-| API | Python 3.11, FastAPI, Uvicorn, Pydantic v2 |
-| Raster processing | Rasterio/GDAL, NumPy, Pillow |
-| Retrieval model | PyTorch, Torchvision, OpenCLIP, SARCLIP GeoRS ViT-L/14 |
-| VLM service client | OpenAI Python client against private vLLM OpenAI-compatible endpoint |
-| Auth/data | Supabase Auth, PostgreSQL, `supabase-py`, Psycopg |
-| Object storage | Boto3 over AWS S3 or MinIO-compatible S3 API |
-| Cache/work transport | Redis Streams and bounded Redis cache |
-| Vector index | Qdrant cosine collection |
-| Tests | Pytest |
+|
+ Area 
+|
+ Technology 
+|
+|
+---
+|
+---
+|
+|
+ API 
+|
+ Python 3.11, FastAPI, Uvicorn, Pydantic v2 
+|
+|
+ Raster processing 
+|
+ Rasterio/GDAL, NumPy, Pillow 
+|
+|
+ Retrieval model 
+|
+ PyTorch, Torchvision, OpenCLIP, SARCLIP GeoRS ViT-L/14 
+|
+|
+ VLM service client 
+|
+ OpenAI Python client against private vLLM OpenAI-compatible endpoint 
+|
+|
+ Auth/data 
+|
+ Supabase Auth, PostgreSQL, 
+`supabase-py`
+, Psycopg 
+|
+|
+ Object storage 
+|
+ Boto3 over AWS S3 or MinIO-compatible S3 API 
+|
+|
+ Cache/work transport 
+|
+ Redis Streams and bounded Redis cache 
+|
+|
+ Vector index 
+|
+ Qdrant cosine collection 
+|
+|
+ Tests 
+|
+ Pytest 
+|
 
 The exact Python dependencies are pinned as minimum versions in `backend/requirements.txt`. The container image starts from `python:3.11-slim`, installs GDAL/runtime libraries, then installs those requirements.
 
@@ -465,20 +914,82 @@ The exact Python dependencies are pinned as minimum versions in `backend/require
 
 The Supabase migrations are ordered lexically and must all be applied. Major durable entities are:
 
-| Entity | Purpose |
-| --- | --- |
-| `profiles` | App profile tied to Supabase Auth user |
-| `projects` | Single-owner analyst projects |
-| `scenes` | Uploaded/processed SAR scene lifecycle and extracted metadata |
-| `scene_artifacts` | Private source/derived artifact metadata |
-| `processing_jobs` | User-visible scene processing/cleanup job |
-| `processing_job_tasks` | Durable M3 stage tasks |
-| `processing_task_dispatches` and `processing_job_dispatches` | PostgreSQL transactional outboxes/dispatch state |
-| `processing_job_events` | Durable event history for the workspace |
-| `patches` | Patch bounds, Qdrant point ID, readiness, model provenance, preview reference |
-| `scene_evidence_records` | Current/superseded evidence projection, model observation, detector facts, provenance |
-| `upload_plans` and `upload_plan_files` | Recoverable browser multipart upload state |
-| `conversations` and `messages` | Owner/project/optional-scene scoped chat history and citations |
+|
+ Entity 
+|
+ Purpose 
+|
+|
+---
+|
+---
+|
+|
+`profiles`
+|
+ App profile tied to Supabase Auth user 
+|
+|
+`projects`
+|
+ Single-owner analyst projects 
+|
+|
+`scenes`
+|
+ Uploaded/processed SAR scene lifecycle and extracted metadata 
+|
+|
+`scene_artifacts`
+|
+ Private source/derived artifact metadata 
+|
+|
+`processing_jobs`
+|
+ User-visible scene processing/cleanup job 
+|
+|
+`processing_job_tasks`
+|
+ Durable M3 stage tasks 
+|
+|
+`processing_task_dispatches`
+ and 
+`processing_job_dispatches`
+|
+ PostgreSQL transactional outboxes/dispatch state 
+|
+|
+`processing_job_events`
+|
+ Durable event history for the workspace 
+|
+|
+`patches`
+|
+ Patch bounds, Qdrant point ID, readiness, model provenance, preview reference 
+|
+|
+`scene_evidence_records`
+|
+ Current/superseded evidence projection, model observation, detector facts, provenance 
+|
+|
+`upload_plans`
+ and 
+`upload_plan_files`
+|
+ Recoverable browser multipart upload state 
+|
+|
+`conversations`
+ and 
+`messages`
+|
+ Owner/project/optional-scene scoped chat history and citations 
+|
 
 Migrations also define lifecycle enums, indexes, ownership/RLS support, updated-at triggers, conversation/message scope synchronization, upload finalization/recovery procedures, task enqueue/cancellation/cleanup procedures, reprocessing procedures, and schema-readiness RPC probes.
 
@@ -502,63 +1013,342 @@ All V1 product routes are under `/api/v1` and require a Supabase bearer token. T
 
 ### Projects and scenes
 
-| Method | Route | Purpose |
-| --- | --- | --- |
-| `GET` | `/projects` | List caller-owned projects |
-| `POST` | `/projects` | Create project (`name`, optional `description`) |
-| `GET` | `/projects/{project_id}` | Get owned project |
-| `PATCH` | `/projects/{project_id}` | Update project name/description |
-| `DELETE` | `/projects/{project_id}` | Delete eligible project through safe lifecycle rules |
-| `GET` | `/projects/{project_id}/scenes` | List owned scenes |
-| `POST` | `/projects/{project_id}/scenes` | Create scene (`name`, optional metadata) |
-| `GET` | `/scenes/{scene_id}` | Get owned scene |
-| `PATCH` | `/scenes/{scene_id}` | Update allowed scene fields |
-| `DELETE` | `/scenes/{scene_id}` | Request safe cleanup/deletion |
-| `GET` | `/scenes/{scene_id}/artifacts` | List owned artifact metadata, never object keys |
+|
+ Method 
+|
+ Route 
+|
+ Purpose 
+|
+|
+---
+|
+---
+|
+---
+|
+|
+`GET`
+|
+`/projects`
+|
+ List caller-owned projects 
+|
+|
+`POST`
+|
+`/projects`
+|
+ Create project (
+`name`
+, optional 
+`description`
+) 
+|
+|
+`GET`
+|
+`/projects/{project_id}`
+|
+ Get owned project 
+|
+|
+`PATCH`
+|
+`/projects/{project_id}`
+|
+ Update project name/description 
+|
+|
+`DELETE`
+|
+`/projects/{project_id}`
+|
+ Delete eligible project through safe lifecycle rules 
+|
+|
+`GET`
+|
+`/projects/{project_id}/scenes`
+|
+ List owned scenes 
+|
+|
+`POST`
+|
+`/projects/{project_id}/scenes`
+|
+ Create scene (
+`name`
+, optional metadata) 
+|
+|
+`GET`
+|
+`/scenes/{scene_id}`
+|
+ Get owned scene 
+|
+|
+`PATCH`
+|
+`/scenes/{scene_id}`
+|
+ Update allowed scene fields 
+|
+|
+`DELETE`
+|
+`/scenes/{scene_id}`
+|
+ Request safe cleanup/deletion 
+|
+|
+`GET`
+|
+`/scenes/{scene_id}/artifacts`
+|
+ List owned artifact metadata, never object keys 
+|
 
 ### Uploads and jobs
 
-| Method | Route | Purpose |
-| --- | --- | --- |
-| `POST` | `/uploads/initiate` | Create/replay idempotent multipart upload plan |
-| `GET` | `/uploads/initiation/{client_request_id}` | Recover the plan associated with a browser request ID |
-| `GET` | `/uploads/{upload_plan_id}/status` | Read durable upload-plan and linked-job state |
-| `POST` | `/uploads/{upload_plan_id}/parts/sign` | Obtain short-lived URL(s) for declared multipart parts |
-| `POST` | `/uploads/{upload_plan_id}/complete` | Verify objects and atomically queue processing |
-| `DELETE` | `/uploads/{upload_plan_id}` | Abort/revoke unfinished plan |
-| `GET` | `/jobs/scenes/{scene_id}` | List jobs for an owned scene |
-| `GET` | `/jobs/{job_id}` | Read an owned processing job |
-| `GET` | `/jobs/{job_id}/events` | Read durable job event history |
-| `POST` | `/jobs/{job_id}/cancel` | Request cancellation |
+|
+ Method 
+|
+ Route 
+|
+ Purpose 
+|
+|
+---
+|
+---
+|
+---
+|
+|
+`POST`
+|
+`/uploads/initiate`
+|
+ Create/replay idempotent multipart upload plan 
+|
+|
+`GET`
+|
+`/uploads/initiation/{client_request_id}`
+|
+ Recover the plan associated with a browser request ID 
+|
+|
+`GET`
+|
+`/uploads/{upload_plan_id}/status`
+|
+ Read durable upload-plan and linked-job state 
+|
+|
+`POST`
+|
+`/uploads/{upload_plan_id}/parts/sign`
+|
+ Obtain short-lived URL(s) for declared multipart parts 
+|
+|
+`POST`
+|
+`/uploads/{upload_plan_id}/complete`
+|
+ Verify objects and atomically queue processing 
+|
+|
+`DELETE`
+|
+`/uploads/{upload_plan_id}`
+|
+ Abort/revoke unfinished plan 
+|
+|
+`GET`
+|
+`/jobs/scenes/{scene_id}`
+|
+ List jobs for an owned scene 
+|
+|
+`GET`
+|
+`/jobs/{job_id}`
+|
+ Read an owned processing job 
+|
+|
+`GET`
+|
+`/jobs/{job_id}/events`
+|
+ Read durable job event history 
+|
+|
+`POST`
+|
+`/jobs/{job_id}/cancel`
+|
+ Request cancellation 
+|
 
 ### Workspace, evidence, and previews
 
-| Method | Route | Purpose |
-| --- | --- | --- |
-| `GET` | `/projects/{project_id}/workspace` | Batched project state and scene summaries |
-| `GET` | `/scenes/{scene_id}/workspace` | Selected scene, artifacts, jobs, patches, overview/evidence availability |
-| `GET` | `/scenes/{scene_id}/evidence-record` | Labelled metadata, land/water, model observation, and detector evidence |
-| `POST` | `/scenes/{scene_id}/reprocess` | Queue eligible failed/cancelled/ready scene for reprocessing |
-| `POST` | `/artifacts/{artifact_id}/preview` | Create a short-lived private image-preview grant |
-| `GET` | `/patches/{patch_id}` | Read owned patch bounds/provenance and preview reference |
-| `POST` | `/search` | Scoped evidence search with project ID, optional scene ID, query, limit, and metadata filters |
+|
+ Method 
+|
+ Route 
+|
+ Purpose 
+|
+|
+---
+|
+---
+|
+---
+|
+|
+`GET`
+|
+`/projects/{project_id}/workspace`
+|
+ Batched project state and scene summaries 
+|
+|
+`GET`
+|
+`/scenes/{scene_id}/workspace`
+|
+ Selected scene, artifacts, jobs, patches, overview/evidence availability 
+|
+|
+`GET`
+|
+`/scenes/{scene_id}/evidence-record`
+|
+ Labelled metadata, land/water, model observation, and detector evidence 
+|
+|
+`POST`
+|
+`/scenes/{scene_id}/reprocess`
+|
+ Queue eligible failed/cancelled/ready scene for reprocessing 
+|
+|
+`POST`
+|
+`/artifacts/{artifact_id}/preview`
+|
+ Create a short-lived private image-preview grant 
+|
+|
+`GET`
+|
+`/patches/{patch_id}`
+|
+ Read owned patch bounds/provenance and preview reference 
+|
+|
+`POST`
+|
+`/search`
+|
+ Scoped evidence search with project ID, optional scene ID, query, limit, and metadata filters 
+|
 
 ### Conversations and NDJSON chat
 
-| Method | Route | Purpose |
-| --- | --- | --- |
-| `POST` | `/conversations` | Create an immutable project- or scene-scoped conversation |
-| `GET` | `/projects/{project_id}/conversations` | List owned project conversations; optional scene filter |
-| `GET` | `/conversations/{conversation_id}/messages` | Load durable owned messages and citations |
-| `POST` | `/conversations/{conversation_id}/stream` | Persist user turn and stream evidence-grounded response as `application/x-ndjson` |
+|
+ Method 
+|
+ Route 
+|
+ Purpose 
+|
+|
+---
+|
+---
+|
+---
+|
+|
+`POST`
+|
+`/conversations`
+|
+ Create an immutable project- or scene-scoped conversation 
+|
+|
+`GET`
+|
+`/projects/{project_id}/conversations`
+|
+ List owned project conversations; optional scene filter 
+|
+|
+`GET`
+|
+`/conversations/{conversation_id}/messages`
+|
+ Load durable owned messages and citations 
+|
+|
+`POST`
+|
+`/conversations/{conversation_id}/stream`
+|
+ Persist user turn and stream evidence-grounded response as 
+`application/x-ndjson`
+|
 
 ### Health and metrics
 
-| Method | Route | Purpose |
-| --- | --- | --- |
-| `GET` | `/healthz` | Process liveness only |
-| `GET` | `/readyz` | Checks configuration, M1–M5 schema readiness, Supabase, object storage, Qdrant, and configured Redis |
-| `GET` | `/metrics` | Prometheus text metrics; protect with `X-Metrics-Token` when configured |
+|
+ Method 
+|
+ Route 
+|
+ Purpose 
+|
+|
+---
+|
+---
+|
+---
+|
+|
+`GET`
+|
+`/healthz`
+|
+ Process liveness only 
+|
+|
+`GET`
+|
+`/readyz`
+|
+ Checks configuration, M1–M5 schema readiness, Supabase, object storage, Qdrant, and configured Redis 
+|
+|
+`GET`
+|
+`/metrics`
+|
+ Prometheus text metrics; protect with 
+`X-Metrics-Token`
+ when configured 
+|
 
 ### Legacy session API
 
@@ -613,52 +1403,258 @@ Do not commit `backend/.env`. `.env.example` is the complete reference; these gr
 
 ### Core and identity
 
-| Variables | Purpose |
-| --- | --- |
-| `ENVIRONMENT` | `development` or `production`; production fails closed on missing critical configuration |
-| `PROJECT_NAME`, `API_V1_STR` | API identity and versioned prefix |
-| `CORS_ORIGINS`, `CORS_ALLOW_CREDENTIALS` | Exact frontend origins and credential policy |
-| `ENABLE_LEGACY_SESSION_API` | Local-only legacy routes; must be `false` in production |
-| `SUPABASE_URL`, `SUPABASE_SERVICE_KEY` | Backend Supabase client/auth validation |
-| `SUPABASE_DB_URL` | Direct PostgreSQL URL used by dispatcher and workers, not the browser |
-| `METRICS_TOKEN`, `LOG_JSON` | Metrics protection and structured logging |
+|
+ Variables 
+|
+ Purpose 
+|
+|
+---
+|
+---
+|
+|
+`ENVIRONMENT`
+|
+`development`
+ or 
+`production`
+; production fails closed on missing critical configuration 
+|
+|
+`PROJECT_NAME`
+, 
+`API_V1_STR`
+|
+ API identity and versioned prefix 
+|
+|
+`CORS_ORIGINS`
+, 
+`CORS_ALLOW_CREDENTIALS`
+|
+ Exact frontend origins and credential policy 
+|
+|
+`ENABLE_LEGACY_SESSION_API`
+|
+ Local-only legacy routes; must be 
+`false`
+ in production 
+|
+|
+`SUPABASE_URL`
+, 
+`SUPABASE_SERVICE_KEY`
+|
+ Backend Supabase client/auth validation 
+|
+|
+`SUPABASE_DB_URL`
+|
+ Direct PostgreSQL URL used by dispatcher and workers, not the browser 
+|
+|
+`METRICS_TOKEN`
+, 
+`LOG_JSON`
+|
+ Metrics protection and structured logging 
+|
 
 ### Storage and upload controls
 
-| Variables | Purpose |
-| --- | --- |
-| `STORAGE_BACKEND` | `minio` for local S3-compatible development or `s3` for AWS |
-| `STORAGE_BUCKET`, `STORAGE_REGION`, `STORAGE_ENDPOINT_URL` | Private bucket and endpoint configuration |
-| `STORAGE_FORCE_PATH_STYLE` | Usually `true` for MinIO |
-| `STORAGE_ACCESS_KEY_ID`, `STORAGE_SECRET_ACCESS_KEY`, `STORAGE_SESSION_TOKEN` | Optional explicit credentials; prefer an AWS IAM role in production |
-| `STORAGE_SIGNED_URL_TTL_SECONDS`, `ARTIFACT_PREVIEW_TTL_SECONDS` | Expiry of upload/download and display grants |
-| `UPLOAD_*` | Multipart part size, plan/lease timing, file/archive/ZIP safety limits |
-| `JOB_DISPATCH_*` | Outbox publishing lease and bounded retry timing |
+|
+ Variables 
+|
+ Purpose 
+|
+|
+---
+|
+---
+|
+|
+`STORAGE_BACKEND`
+|
+`minio`
+ for local S3-compatible development or 
+`s3`
+ for AWS 
+|
+|
+`STORAGE_BUCKET`
+, 
+`STORAGE_REGION`
+, 
+`STORAGE_ENDPOINT_URL`
+|
+ Private bucket and endpoint configuration 
+|
+|
+`STORAGE_FORCE_PATH_STYLE`
+|
+ Usually 
+`true`
+ for MinIO 
+|
+|
+`STORAGE_ACCESS_KEY_ID`
+, 
+`STORAGE_SECRET_ACCESS_KEY`
+, 
+`STORAGE_SESSION_TOKEN`
+|
+ Optional explicit credentials; prefer an AWS IAM role in production 
+|
+|
+`STORAGE_SIGNED_URL_TTL_SECONDS`
+, 
+`ARTIFACT_PREVIEW_TTL_SECONDS`
+|
+ Expiry of upload/download and display grants 
+|
+|
+`UPLOAD_*`
+|
+ Multipart part size, plan/lease timing, file/archive/ZIP safety limits 
+|
+|
+`JOB_DISPATCH_*`
+|
+ Outbox publishing lease and bounded retry timing 
+|
 
 ### Queue, workers, and vector store
 
-| Variables | Purpose |
-| --- | --- |
-| `REDIS_URL`, `REDIS_KEY_PREFIX`, Redis socket timeouts | Worker Stream connection and tenant-safe cache namespace |
-| `QDRANT_URL`, `QDRANT_API_KEY`, `QDRANT_COLLECTION` | Qdrant connection and collection (`sar_patches` by default) |
-| `M3_OUTBOX_POLL_SECONDS`, leases, stream block/claim values | Durable task polling/recovery behaviour |
-| `M3_CPU_WORKER_CONCURRENCY` | CPU/IO worker concurrency |
-| `M3_GPU_INFERENCE_CONCURRENCY` | Per-GPU process inference concurrency; begin at 1 |
-| `M3_TASK_MAX_ATTEMPTS`, `M3_QDRANT_BATCH_SIZE`, `M3_MAX_PATCH_PREVIEWS` | Retry, indexing, and preview limits |
+|
+ Variables 
+|
+ Purpose 
+|
+|
+---
+|
+---
+|
+|
+`REDIS_URL`
+, 
+`REDIS_KEY_PREFIX`
+, Redis socket timeouts 
+|
+ Worker Stream connection and tenant-safe cache namespace 
+|
+|
+`QDRANT_URL`
+, 
+`QDRANT_API_KEY`
+, 
+`QDRANT_COLLECTION`
+|
+ Qdrant connection and collection (
+`sar_patches`
+ by default) 
+|
+|
+`M3_OUTBOX_POLL_SECONDS`
+, leases, stream block/claim values 
+|
+ Durable task polling/recovery behaviour 
+|
+|
+`M3_CPU_WORKER_CONCURRENCY`
+|
+ CPU/IO worker concurrency 
+|
+|
+`M3_GPU_INFERENCE_CONCURRENCY`
+|
+ Per-GPU process inference concurrency; begin at 1 
+|
+|
+`M3_TASK_MAX_ATTEMPTS`
+, 
+`M3_QDRANT_BATCH_SIZE`
+, 
+`M3_MAX_PATCH_PREVIEWS`
+|
+ Retry, indexing, and preview limits 
+|
 
 ### Models and chat budgets
 
-| Variables | Purpose |
-| --- | --- |
-| `VLLM_BASE_URL`, `SARCHAT_MODEL_ID` | Private visual-language model endpoint and model path |
-| `SARCLIP_CHECKPOINT_PATH`, `SARCLIP_DEVICE`, `SARCLIP_BATCH_SIZE` | Retrieval model loading/inference |
-| `SARCLIP_MODEL_NAME`, `SARCLIP_MODEL_VERSION` | Stored patch/Qdrant provenance |
-| `M3_VLLM_*` | Worker caption timeout, input-size, image, and token budgets |
-| `M5_QUERY_EMBEDDING_TTL_SECONDS`, `M5_RETRIEVAL_TTL_SECONDS`, `M5_RAG_CONTEXT_TTL_SECONDS` | Bounded evidence-cache lifetimes |
-| `M5_SEARCH_MAX_RESULTS`, `M5_WEAK_RETRIEVAL_SCORE` | Search limits and weak-result cutoff |
-| `M5_MAX_*` | Query/history/context/fact/image/output budgets |
-| `M5_SCENE_QUADRANT_SAMPLES`, `M5_SCENE_QUADRANT_MAX_PIXELS` | Description-time transient overview crops |
-| `M5_QDRANT_INDEX_VERSION` | Bump when payload/index semantics change to bypass stale derived cache |
+|
+ Variables 
+|
+ Purpose 
+|
+|
+---
+|
+---
+|
+|
+`VLLM_BASE_URL`
+, 
+`SARCHAT_MODEL_ID`
+|
+ Private visual-language model endpoint and model path 
+|
+|
+`SARCLIP_CHECKPOINT_PATH`
+, 
+`SARCLIP_DEVICE`
+, 
+`SARCLIP_BATCH_SIZE`
+|
+ Retrieval model loading/inference 
+|
+|
+`SARCLIP_MODEL_NAME`
+, 
+`SARCLIP_MODEL_VERSION`
+|
+ Stored patch/Qdrant provenance 
+|
+|
+`M3_VLLM_*`
+|
+ Worker caption timeout, input-size, image, and token budgets 
+|
+|
+`M5_QUERY_EMBEDDING_TTL_SECONDS`
+, 
+`M5_RETRIEVAL_TTL_SECONDS`
+, 
+`M5_RAG_CONTEXT_TTL_SECONDS`
+|
+ Bounded evidence-cache lifetimes 
+|
+|
+`M5_SEARCH_MAX_RESULTS`
+, 
+`M5_WEAK_RETRIEVAL_SCORE`
+|
+ Search limits and weak-result cutoff 
+|
+|
+`M5_MAX_*`
+|
+ Query/history/context/fact/image/output budgets 
+|
+|
+`M5_SCENE_QUADRANT_SAMPLES`
+, 
+`M5_SCENE_QUADRANT_MAX_PIXELS`
+|
+ Description-time transient overview crops 
+|
+|
+`M5_QDRANT_INDEX_VERSION`
+|
+ Bump when payload/index semantics change to bypass stale derived cache 
+|
 
 ## Local development
 
@@ -837,4 +1833,4 @@ The following limitations are intentional and should remain visible in product c
 5. **No production reliance on legacy session routes.** Use the V1 project/scene/evidence API only.
 6. **Model/config compatibility is operational work.** The model server image capacity, prompt budgets, CUDA/PyTorch versions, model path, and licenses must be verified together on the target hardware.
 
-For deeper design and release detail, read [the top-down architecture](docs/v1-top-down-architecture.md), [the implementation plan](docs/v1-implementation-plan.md), [M2 upload operations](docs/m2-upload-operations.md), [M3 durable pipeline](docs/m3-durable-pipeline.md), [M4 workspace](docs/m4-workspace.md), [M5 evidence chat](docs/m5-evidence-chat.md), and [the M6 release runbook](docs/m6-release-runbook.md).
+For deeper design and release detail, read [the top-down architecture](docs/v1-top-down-architecture.md), [the implementation plan](docs/v1-implementation-plan.md), [M2 upload operations](docs/m2-upload-operations.md), [M3 durable pipeline](docs/m3-durable-pipeline.md), [M4 workspace](docs/m4-workspace.md), [M5 evidence chat](docs/m5-evidence-chat.md), and [the M6 release runbook](docs/m6-release-runbook.md)
