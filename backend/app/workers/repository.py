@@ -49,7 +49,21 @@ class WorkerRepository:
         per-item loop (hundreds to a thousand patches) opens that many fresh
         connections against the pooler; a hung pooler handoff on any single
         one of them then blocks the whole loop indefinitely."""
-        with psycopg.connect(self._dsn, row_factory=dict_row, connect_timeout=10) as connection:
+        # connect_timeout only bounds the initial TCP handshake. Once open, a
+        # connection that goes silently dead server-side (pooler recycling,
+        # a load balancer idle-closing it, a stuck backend) has no other
+        # timeout at all, so any later statement on it hangs forever with no
+        # exception raised -- observed live, twice, as a worker frozen for
+        # 20+ minutes inside a plain single-row INSERT with zero lock
+        # contention. keepalives detect a dead socket in ~20-25s; statement_
+        # timeout bounds a genuinely slow-but-connected query. Either failure
+        # now surfaces as an exception within seconds and goes through the
+        # existing retry path instead of freezing the worker indefinitely.
+        with psycopg.connect(
+            self._dsn, row_factory=dict_row, connect_timeout=10,
+            options="-c statement_timeout=15000",
+            keepalives=1, keepalives_idle=10, keepalives_interval=5, keepalives_count=3,
+        ) as connection:
             yield connection
 
     @contextmanager
