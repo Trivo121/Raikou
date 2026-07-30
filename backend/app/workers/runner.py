@@ -152,7 +152,14 @@ class M3Worker:
             self.repository.retry_or_fail_task(task, worker_id=self.worker_id, code=exc.code, detail=str(exc), retryable=False)
             settled = True
         except RetryableTaskError as exc:
-            logger.warning("M3 task %s will retry: %s", task["id"], exc)
+            # These are raised with `from exc`, so the wrapped cause is the only
+            # thing that identifies which dependency actually failed. Without
+            # exc_info the log shows just the generic operator-facing sentence
+            # ("Unable to download a private source artifact.") for a missing
+            # object, a permission denial, a full disk, and a network drop
+            # alike -- indistinguishable, and none of them reproducible from a
+            # shell. Log the chain.
+            logger.warning("M3 task %s will retry: %s", task["id"], exc, exc_info=True)
             self.repository.retry_or_fail_task(task, worker_id=self.worker_id, code="DEPENDENCY_UNAVAILABLE", detail=str(exc), retryable=True)
             settled = True
         except Exception:
