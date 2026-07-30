@@ -119,7 +119,11 @@ log "8/8 Restart services and verify"
 sudo systemctl restart sarchat-vllm \
   || echo "WARN: sarchat-vllm restart failed (journalctl -u sarchat-vllm -n 50)"
 # Workers/dispatcher only exist if these units were installed on this box.
-for unit in raikou-outbox-dispatcher raikou-worker-cpu@1 raikou-worker-gpu@1; do
+# NOTE: for raikou-worker-gpu@N the instance number N is the CUDA device index
+# (the unit sets CUDA_VISIBLE_DEVICES=%i), NOT a worker sequence number as it is
+# for the CPU unit. Restarting @1 on a single-GPU box starts a worker that sees
+# zero GPUs and fails every task it claims with "No CUDA GPUs are available".
+for unit in raikou-outbox-dispatcher raikou-worker-cpu@1 raikou-worker-gpu@0; do
   sudo systemctl restart "$unit" 2>/dev/null && echo "restarted $unit" || true
 done
 sudo systemctl start sar-backend
