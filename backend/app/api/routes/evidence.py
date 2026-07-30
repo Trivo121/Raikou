@@ -67,6 +67,26 @@ _chat_client = AsyncOpenAI(base_url=settings.VLLM_BASE_URL, api_key="sk-no-key")
 # served context. The list is truncated from the end, which drops retrieved
 # patch previews before the overview quadrants and the overview itself.
 _IMAGE_SHED_STEPS = (6, 3, 1, 0)
+
+# SARChat is a fine-tuned SAR object-captioning model, not a general describer.
+# Asked to "describe this scene" it returns its training template -- "there is
+# a ship in the bottom left portion {<bbox>}" -- and it returns that same
+# sentence, with coordinates, for pure black, random noise and every real patch
+# alike, so the output carries no information about its input. The vision path
+# is fine: asked a narrow question with the permitted answers enumerated, the
+# same model reads the pixels correctly (all-white -> "bright", all-black ->
+# "mostly dark", top-half-white -> "mostly bright"). Scene description
+# therefore asks only for observations this model can actually make, which also
+# keeps it inside the grounding policy instead of fighting it.
+_SCENE_OBSERVATION_TEMPLATE = (
+    "\n\nAnswer each of these on its own line, using only the words offered, and name no objects:\n"
+    "1. Overall brightness (bright / dark / mixed):\n"
+    "2. Both bright and dark regions present (yes / no):\n"
+    "3. Texture (uniform / varied):\n"
+    "4. Boundaries between regions (smooth / irregular / none):\n"
+    "Then add one sentence of scene context drawn only from the authorized evidence above, "
+    "and state plainly whether any validated detector facts were supplied for this scene."
+)
 _ARTIFACT_IMAGE_KINDS = {"overview", "thumbnail", "patch_preview"}
 
 
@@ -922,9 +942,16 @@ def _bounded_context_text(context: dict[str, Any]) -> str:
         detector = scene.get("detector")
         if isinstance(detector, dict) and detector:
             lines.append("DETECTOR PROVENANCE: " + json.dumps(detector, separators=(",", ":")))
-        observation = _bounded_text(scene.get("model_observation"), 2000)
-        if observation:
-            lines.append(f"MODEL OBSERVATION (not a detection): {observation}")
+        # The model observation is deliberately NOT placed in the prompt. It is
+        # a caption of the whole-scene overview, an image downscaled far enough
+        # that no vessel or structure is resolvable, so any object it names is
+        # unfounded by construction -- in practice "I can identify a ship: one
+        # instance" for a scene with zero detector facts. Supplied as text it
+        # became the most answer-shaped line in the prompt, and the 2B model
+        # copied it verbatim into an assertive answer for every question asked,
+        # laundering a hallucination into apparent evidence. The caption is
+        # still persisted on the scene record and still cited, so provenance is
+        # unchanged; it simply stops steering generation.
         facts = scene.get("validated_detector_facts")
         if isinstance(facts, list) and facts:
             lines.append("VALIDATED DETECTOR FACTS: " + json.dumps(facts[: settings.M5_MAX_CONTEXT_FACTS], separators=(",", ":")))
@@ -1076,6 +1103,106 @@ async def _load_authorized_context_images(
             images.extend(_overview_quadrant_images(image_bytes))
             quadrants_added = True
     return images
+
+
+_OBSERVATION_TASK = (
+    "Answer each of these on its own line, using only the words offered, and name no objects:\n"
+    "1. Overall brightness (bright / dark / mixed):\n"
+    "2. Both bright and dark regions present (yes / no):\n"
+    "3. Texture (uniform / varied):\n"
+    "4. Boundaries between regions (smooth / irregular / none):"
+)
+_OBSERVATION_LABELS = ("Overall brightness", "Both bright and dark regions", "Texture", "Region boundaries")
+
+
+async def _visual_observations(overview_image: dict[str, Any] | None) -> list[str]:
+    """Ask the captioner only what it can answer, in the only prompt shape that works.
+
+    Measured behaviour of this checkpoint: given a task-only prompt and a single
+    image it reads the pixels correctly (all-white -> "bright", all-black ->
+    "mostly dark", half-white -> "mostly bright"). Adding the evidence block,
+    the conversation history or the other nine images tips it back into its
+    fine-tuned grounding format -- "there is a ship in the bottom left portion"
+    or a bare "{<1><1><1><1>}" -- which it emits for pure black and random noise
+    just as readily, so that output describes nothing. The probe is therefore
+    issued as its own minimal request and the reply is composed in code, where
+    the grounding rules hold regardless of what the model says.
+    """
+    if overview_image is None:
+        return []
+    try:
+        completion = await asyncio.wait_for(
+            _chat_client.chat.completions.create(
+                model=settings.SARCHAT_MODEL_ID,
+                messages=[{"role": "user", "content": [{"type": "text", "text": _OBSERVATION_TASK}, overview_image]}],
+                max_tokens=120,
+                temperature=0.0,
+            ),
+            timeout=settings.M5_GENERATION_TIMEOUT_SECONDS,
+        )
+    except Exception:
+        logger.info("Scene visual observation probe failed", exc_info=True)
+        return []
+    raw = (completion.choices[0].message.content or "") if completion.choices else ""
+    answers: list[str] = []
+    for line in raw.splitlines():
+        line = " ".join(line.split())
+        # Drop anything carrying the model's coordinate syntax: those are the
+        # fabricated-grounding replies, not observations.
+        if not line or "<" in line or ":" not in line or not line[0].isdigit():
+            continue
+        value = line.split(":", 1)[1].strip().rstrip(".").lower()
+        if value and len(value) <= 24:
+            answers.append(value)
+    return answers[:4]
+
+
+def _compose_scene_description(*, context: dict[str, Any], scene_id: UUID, observations: list[str]) -> str:
+    """Build the scene answer from authorized evidence, not from model prose."""
+    scene = _selected_scene_context(context, scene_id) or {}
+    facts = scene.get("validated_detector_facts") or []
+    lines = ["Scene context"]
+    lines.append(
+        f"- {scene.get('sensor') or 'Unknown sensor'}, polarizations "
+        f"{', '.join(scene.get('polarizations') or []) or 'unknown'}, acquired "
+        f"{scene.get('acquisition_time') or 'unknown'}."
+    )
+    land_water = scene.get("land_water")
+    if isinstance(land_water, dict) and land_water:
+        summary = ", ".join(f"{key}={value}" for key, value in list(land_water.items())[:4])
+        lines.append(f"- Land/water estimate (backscatter heuristic, not segmentation): {summary}.")
+    lines.append("")
+    lines.append("Detector-backed objects")
+    if facts:
+        counts: dict[str, int] = {}
+        for fact in facts:
+            label = fact.get("label") if isinstance(fact, dict) else None
+            if isinstance(label, str):
+                counts[label] = counts.get(label, 0) + 1
+        lines.append("- " + "; ".join(f"{label}: {count}" for label, count in sorted(counts.items())) + ".")
+    else:
+        lines.append(
+            "- None. No detector sidecar was supplied for this scene, so no object, count or "
+            "location can be confirmed. A missing detection is not proof of absence."
+        )
+    lines.append("")
+    lines.append("Uncertain observations")
+    if observations:
+        for label, value in zip(_OBSERVATION_LABELS, observations):
+            lines.append(f"- {label}: {value}.")
+        lines.append(
+            "- These describe the heavily downscaled scene overview only, in which objects at "
+            "vessel scale are smaller than one pixel. They are not detections."
+        )
+    else:
+        lines.append("- No reliable visual observation could be obtained for this scene.")
+    patches = context.get("patches") or []
+    if patches:
+        lines.append(
+            f"- SARCLIP retrieved {len(patches)} similar patch preview(s) within this scope. "
+            "Embedding similarity is not object classification."
+        )
+    return "\n".join(lines)
 
 
 def _is_context_overflow(exc: BaseException) -> bool:
@@ -1238,11 +1365,22 @@ async def stream_grounded_chat(
                 if isinstance(item, dict) and isinstance(item.get("label"), str)
             ]
             scene_intent = classify_scene_query(request.query, detector_labels)
-            if scene_intent in {"visual_evidence", "detector_location"}:
+            if scene_intent in {"visual_evidence", "detector_location", "scene_description"}:
                 # Patch retrieval remains valuable for explicitly visual or
                 # location-oriented requests, but augments the scene record.
+                #
+                # scene_description needs it for a different reason. The only
+                # imagery it would otherwise send is the whole-scene overview,
+                # and a Sentinel-1 GRD scene is tens of thousands of pixels
+                # wide, so even a large vessel is around a pixel there and a
+                # small boat is far below one. With nothing legible in frame
+                # the model answers from its captioning prior instead of the
+                # image, and every question collapses to the same sentence.
+                # Retrieved patch previews are the only native-resolution
+                # imagery available, and at one tile each they are also
+                # cheaper than the quadrant crops they sit beside.
                 search, scenes_by_id = await _search_authorized(search_request, current_user)
-                if scene_intent == "detector_location":
+                if scene_intent in {"detector_location", "scene_description"}:
                     preloaded_context = await _load_rag_context(
                         search=search,
                         scenes_by_id=scenes_by_id,
@@ -1364,38 +1502,69 @@ async def stream_grounded_chat(
                 current_user=current_user,
                 include_scene_quadrants=selected_scene_id is not None and scene_intent == "scene_description",
             )
-            system = (
-                "You are SARChat, the final SAR scene narrator. The authorized scene record is the primary source; "
-                "then use the full overview and its quadrant samples for scene-level visual observations. Retrieved patches are optional "
-                "supporting visual evidence only. SARCLIP selected them by embedding similarity and is never an object detector. "
-                "Keep three evidence classes distinct: (1) conservative scene context, including the land/water heuristic; "
-                "(2) detector-backed object candidates, which may only come from explicitly supplied validated detector facts; and "
-                "(3) uncertain observations, such as bright points, elongated returns, linear structures, texture differences, or wake-like patterns. "
-                "Never turn a caption, visual impression, bright return, model observation, or SARCLIP retrieval result into a verified object, "
-                "a bounding box, a count, land-cover class, activity, intent, temporal change, vessel type, or anomaly label. "
-                "Do not claim fishing, loitering, military activity, vegetation, buildings, ships, aircraft, vehicles, bridges, ports, tanks, "
-                "or any other object unless the supplied detector facts explicitly support that claim. "
-                "For 'describe', 'explain', or 'what is happening' questions, answer with the compact sections 'Scene context', "
-                "'Detector-backed objects', and 'Uncertain observations'. State that a land/water estimate is heuristic, "
-                "say when no detector facts are available, and make no claim beyond a single acquisition. "
-                "For a narrow question, answer it first and then name the relevant evidence class. Refer to scene names or patch IDs when useful."
-            )
-            text_part: dict[str, Any] = {
-                "type": "text",
-                "text": (
-                    f"Question: {request.query}\n\n{_bounded_context_text(context)}\n\n"
-                    "When present, visual inputs are ordered as: full overview; north-west, north-east, "
-                    "south-west, and south-east overview quadrants; then optional retrieved patch previews."
-                ),
-            }
-            stream = await _open_grounded_stream(
-                system=system, history=history, text_part=text_part, images=images
-            )
-            async for chunk in stream:
-                if chunk.choices and chunk.choices[0].delta.content:
-                    delta = chunk.choices[0].delta.content
-                    full_response += delta
-                    yield _ndjson("text", delta)
+            # A 2B captioning model cannot follow the full policy prompt: with it
+            # in place the structured task collapses to one truncated line or to
+            # "there is a ship", while the identical task with a minimal system
+            # prompt is answered correctly from the pixels. Worse, the policy
+            # enumerates the objects it forbids ("ships, aircraft, bridges,
+            # ports, tanks"), and a model this size does not carry the negation
+            # -- naming them primes them. Scene description therefore runs on a
+            # task-only prompt whose permitted answers are enumerated, which
+            # constrains the output far more reliably than prose ever did.
+            if scene_intent == "scene_description":
+                system = (
+                    "Answer only the numbered questions, each on its own line, using only the words offered. "
+                    "Name no objects and give no coordinates."
+                )
+            else:
+                system = (
+                    "You are SARChat, the final SAR scene narrator. The authorized scene record is the primary source. "
+                    "The full overview and its quadrant samples are a heavily downscaled view of a scene that is tens of "
+                    "thousands of pixels wide: a ship there is about one pixel and a small boat is far smaller, so no vessel, "
+                    "vehicle, building or other object can be seen in them at all. Use the overview and quadrants only for "
+                    "large-scale structure such as coastline, land and water regions, and broad texture differences, and never "
+                    "name, count or locate an object from them. Only the retrieved patch previews are at native resolution, so "
+                    "they are the sole imagery in which visual detail may be described. Retrieved patches are optional "
+                    "supporting visual evidence only. SARCLIP selected them by embedding similarity and is never an object detector. "
+                    "Keep three evidence classes distinct: (1) conservative scene context, including the land/water heuristic; "
+                    "(2) detector-backed object candidates, which may only come from explicitly supplied validated detector facts; and "
+                    "(3) uncertain observations, such as bright points, elongated returns, linear structures, texture differences, or wake-like patterns. "
+                    "Never turn a caption, visual impression, bright return, model observation, or SARCLIP retrieval result into a verified object, "
+                    "a bounding box, a count, land-cover class, activity, intent, temporal change, vessel type, or anomaly label. "
+                    "Do not claim fishing, loitering, military activity, vegetation, buildings, ships, aircraft, vehicles, bridges, ports, tanks, "
+                    "or any other object unless the supplied detector facts explicitly support that claim. "
+                    "For 'describe', 'explain', or 'what is happening' questions, answer with the compact sections 'Scene context', "
+                    "'Detector-backed objects', and 'Uncertain observations'. State that a land/water estimate is heuristic, "
+                    "say when no detector facts are available, and make no claim beyond a single acquisition. "
+                    "For a narrow question, answer it first and then name the relevant evidence class. Refer to scene names or patch IDs when useful."
+                )
+            if scene_intent == "scene_description" and selected_scene_id is not None:
+                # Composed rather than narrated: the probe supplies only the
+                # visual attributes this model answers reliably, and the
+                # grounding rules are applied here instead of being requested
+                # of a 2B captioner that demonstrably does not follow them.
+                observations = await _visual_observations(images[0] if images else None)
+                full_response = _compose_scene_description(
+                    context=context, scene_id=selected_scene_id, observations=observations
+                )
+                yield _ndjson("text", full_response)
+            else:
+                text_part: dict[str, Any] = {
+                    "type": "text",
+                    "text": (
+                        f"Question: {request.query}\n\n{_bounded_context_text(context)}\n\n"
+                        "When present, visual inputs are ordered as: full overview; north-west, north-east, "
+                        "south-west, and south-east overview quadrants; then optional retrieved patch previews."
+                    ),
+                }
+                stream = await _open_grounded_stream(
+                    system=system, history=history, text_part=text_part, images=images
+                )
+                async for chunk in stream:
+                    if chunk.choices and chunk.choices[0].delta.content:
+                        delta = chunk.choices[0].delta.content
+                        full_response += delta
+                        yield _ndjson("text", delta)
         except asyncio.CancelledError:
             assistant_status = "cancelled"
             raise

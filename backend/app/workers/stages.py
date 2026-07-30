@@ -62,6 +62,14 @@ _NEXT_STAGE: dict[str, tuple[str, str] | None] = {
 # 31k-patch scene from ~94000 to ~63.
 PATCH_UPSERT_BATCH_SIZE = 500
 
+# Longest edge of the whole-scene overview JPEG. InternVL2.5 renders an image
+# as up to twelve 448px tiles plus a thumbnail, so it can represent roughly
+# 1792x1344; the previous 1024 cap spent only two or three of those twelve
+# tiles and threw away detail the model had budget to see. This does not make
+# vessels legible in a 25000px scene -- nothing that fits in a prompt does --
+# but it is the cheapest honest improvement to scene-level structure.
+OVERVIEW_MAX_EDGE = 1792
+
 _PROGRESS = {
     "validate_upload": 5,
     "extract_metadata": 15,
@@ -268,17 +276,24 @@ class M3Pipeline:
         output = self._workdir(task) / "overview-full.jpg"
         try:
             with rasterio.open(vrt_path) as dataset:
-                scale = min(1.0, 1024 / max(dataset.width, dataset.height))
-                width = max(1, int(dataset.width * scale))
-                height = max(1, int(dataset.height * scale))
+                source_width, source_height = dataset.width, dataset.height
+                scale = min(1.0, OVERVIEW_MAX_EDGE / max(source_width, source_height))
+                width = max(1, int(source_width * scale))
+                height = max(1, int(source_height * scale))
                 raw = dataset.read(out_shape=(dataset.count, height, width), resampling=Resampling.average)
                 rgb = _build_channels(raw)
             Image.fromarray(rgb).save(output, format="JPEG", quality=88, optimize=True)
+            # Downscale is recorded because it decides what may honestly be
+            # said about this image: at 25000px wide a vessel is around a
+            # pixel, so the overview supports scene structure only.
+            downscale = round(max(source_width, source_height) / max(width, height), 1)
         except (OSError, ValueError, rasterio.errors.RasterioError) as exc:
             raise UserFacingTaskError("OVERVIEW_BUILD_FAILED", "The scene overview could not be generated.") from exc
         artifact = self._persist_file(task, kind="overview", logical_key="derived:overview:full:v1", path=output,
-                                      content_type="image/jpeg", metadata={"width": width, "height": height})
-        return {"overview_artifact_id": str(artifact["id"]), "width": width, "height": height}
+                                      content_type="image/jpeg",
+                                      metadata={"width": width, "height": height, "source_width": source_width,
+                                                "source_height": source_height, "downscale": downscale})
+        return {"overview_artifact_id": str(artifact["id"]), "width": width, "height": height, "downscale": downscale}
 
     def _patch_identity(self, task: dict[str, Any], row_start: int, col_start: int) -> tuple[UUID, str]:
         material = f"{task['scene_id']}:{settings.SARCLIP_MODEL_NAME}:{settings.SARCLIP_MODEL_VERSION}:{row_start}:{col_start}:{PATCH_SIZE}"
