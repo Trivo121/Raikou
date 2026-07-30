@@ -519,6 +519,59 @@ class WorkerRepository:
                  Jsonb(facts), Jsonb(metadata), model_name, model_version),
             )
 
+    def upsert_patches(
+        self, task: dict[str, Any], rows: list[dict[str, Any]], *,
+        connection: psycopg.Connection[dict[str, Any]] | None = None,
+    ) -> None:
+        """Upsert a batch of patches in one statement.
+
+        The worker and the database sit in different AWS regions (~167 ms round
+        trip), so a per-row BEGIN/INSERT/COMMIT costs ~456 ms and caps tiling at
+        about 2 patches/second -- close to four hours for a 31k-patch scene,
+        essentially all of it spent waiting on the network rather than on the
+        database. Batching makes the round-trip count a function of the number
+        of batches instead of the number of patches. The conflict target is
+        unchanged, so re-running a stage is still idempotent.
+        """
+        if not rows:
+            return
+        if connection is None:
+            with self.transaction() as conn:
+                self._upsert_patches(conn, task, rows)
+            return
+        with connection.transaction():
+            self._upsert_patches(connection, task, rows)
+
+    @staticmethod
+    def _upsert_patches(
+        connection: psycopg.Connection[dict[str, Any]], task: dict[str, Any], rows: list[dict[str, Any]],
+    ) -> None:
+        tuple_sql = "(%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, 'pending'::public.patch_status, %s)"
+        params: list[Any] = []
+        for row in rows:
+            size = row["patch_size"]
+            params.extend([
+                row["patch_id"], row["patch_id"], task["owner_id"], task["project_id"], task["scene_id"],
+                row["source_artifact_id"], row["preview_artifact_id"],
+                row["row_start"], row["row_start"] + size,
+                row["col_start"], row["col_start"] + size,
+                size, row["patch_key"],
+            ])
+        with connection.cursor() as cursor:
+            cursor.execute(
+                f"""
+                insert into public.patches (
+                  id, qdrant_point_id, owner_id, project_id, scene_id, source_artifact_id,
+                  preview_artifact_id, row_start, row_end, col_start, col_end, patch_size,
+                  status, patch_key
+                ) values {", ".join([tuple_sql] * len(rows))}
+                on conflict (scene_id, patch_key) where patch_key is not null do update
+                  set preview_artifact_id = coalesce(excluded.preview_artifact_id, public.patches.preview_artifact_id),
+                      source_artifact_id = coalesce(excluded.source_artifact_id, public.patches.source_artifact_id)
+                """,
+                params,
+            )
+
     def upsert_patch(
         self, task: dict[str, Any], *, patch_id: UUID, patch_key: str, row_start: int, col_start: int,
         patch_size: int, source_artifact_id: str | UUID | None, preview_artifact_id: str | UUID | None = None,

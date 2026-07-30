@@ -57,6 +57,11 @@ _NEXT_STAGE: dict[str, tuple[str, str] | None] = {
     "finalize": None,
     "cleanup": None,
 }
+# Patches per multi-row upsert. 500 rows x 14 columns stays far below
+# PostgreSQL's 65535 bound parameter limit while cutting the round trips for a
+# 31k-patch scene from ~94000 to ~63.
+PATCH_UPSERT_BATCH_SIZE = 500
+
 _PROGRESS = {
     "validate_upload": 5,
     "extract_metadata": 15,
@@ -295,6 +300,7 @@ class M3Pipeline:
             # was what put the pooler under enough pressure to hang a handoff
             # indefinitely and freeze the whole worker.
             with self.repository.connection() as connection:
+                batch: list[dict[str, Any]] = []
                 for patch in iterator:
                     patch_id, patch_key = self._patch_identity(task, patch.row_start, patch.col_start)
                     preview_artifact_id = None
@@ -307,11 +313,18 @@ class M3Pipeline:
                                                      connection=connection)
                         preview_artifact_id = str(preview["id"])
                         preview_count += 1
-                    self.repository.upsert_patch(task, patch_id=patch_id, patch_key=patch_key,
-                                                 row_start=patch.row_start, col_start=patch.col_start,
-                                                 patch_size=PATCH_SIZE, source_artifact_id=source_artifact_id,
-                                                 preview_artifact_id=preview_artifact_id, connection=connection)
+                    batch.append({
+                        "patch_id": patch_id, "patch_key": patch_key,
+                        "row_start": patch.row_start, "col_start": patch.col_start,
+                        "patch_size": PATCH_SIZE, "source_artifact_id": source_artifact_id,
+                        "preview_artifact_id": preview_artifact_id,
+                    })
                     patch_count += 1
+                    if len(batch) >= PATCH_UPSERT_BATCH_SIZE:
+                        self.repository.upsert_patches(task, batch, connection=connection)
+                        batch = []
+                if batch:
+                    self.repository.upsert_patches(task, batch, connection=connection)
         except (OSError, ValueError, rasterio.errors.RasterioError) as exc:
             raise UserFacingTaskError("PATCH_TILING_FAILED", "Patch extraction failed for this scene.") from exc
         if patch_count == 0:
