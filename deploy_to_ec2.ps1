@@ -1,6 +1,6 @@
-$PemKey = "D:\Study\Projects\Raikou\hackeval-key_AWS_key_value_pair.pem"
+$PemKey = "D:\Study\Projects\Raikou\RAIKOU.pem"
 $Ec2User = "ubuntu"
-$Ec2Host = "65.0.32.233"
+$Ec2Host = "13.203.213.241"
 $LocalBackend = "D:\Study\Projects\Raikou\backend"
 $RemoteBackend = "/home/ubuntu/backend"
 

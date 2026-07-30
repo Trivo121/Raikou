@@ -7,6 +7,14 @@
 
 # Private deployment credentials must never enter source control.
 *.pem
+*.ppk
+*.key
+# IAM access keys download straight from the AWS console into the working
+# directory with these names, so a plain `git add .` would publish them.
+*accessKeys*.csv
+*credentials*.csv
+*_accessKeys.csv
+aws_credentials*
 
 # Node.js
 node_modules/
