@@ -8,7 +8,22 @@ Type=simple
 Restart=always
 RestartSec=10
 ExecStartPre=-/usr/bin/docker rm -f sarchat-vllm
-ExecStart=/usr/bin/docker run --rm --name sarchat-vllm --gpus all --restart=no -v /home/ubuntu/backend/models:/models -p 127.0.0.1:8001:8000 vllm/vllm-openai:latest --model /models/SARChat-InternVL2.5-2B --trust-remote-code --gpu-memory-utilization 0.45 --max-model-len 4096 --max-num-seqs 2 --limit-mm-per-prompt {\"image\":4}
+# Context/memory budget, on a 23 GB A10G shared with the SARCLIP encoder:
+#
+#   max-model-len 16384 - the model itself supports 32768; 4096 was far too
+#     small for this workload. InternVL2.5 renders one image as up to 12
+#     448px tiles plus a thumbnail at 256 tokens each (~3300 tokens per
+#     image), so an overview + its four quadrant samples + retrieved patch
+#     previews reached ~9650 tokens and every scene-description request was
+#     rejected with "Input length exceeds model's maximum context length".
+#   gpu-memory-utilization 0.60 - KV cache is 96 KiB/token, so 16384 tokens
+#     x 2 sequences needs ~3 GB against ~0.75 GB at 4096. 0.45 could not fund
+#     it. 0.60 is ~13.8 GB and still leaves ~7 GB for the SARCLIP worker
+#     (~2 GB resident) plus headroom.
+#   limit-mm-per-prompt image:12 - the API can attach up to 10 images
+#     (6 artifacts + 4 overview quadrants); the previous limit of 6 would
+#     have rejected scene-description prompts on image count alone.
+ExecStart=/usr/bin/docker run --rm --name sarchat-vllm --gpus all --restart=no -v /home/ubuntu/backend/models:/models -p 127.0.0.1:8001:8000 vllm/vllm-openai:latest --model /models/SARChat-InternVL2.5-2B --trust-remote-code --gpu-memory-utilization 0.60 --max-model-len 16384 --max-num-seqs 2 --limit-mm-per-prompt {\"image\":12}
 ExecStop=/usr/bin/docker stop -t 30 sarchat-vllm
 
 [Install]

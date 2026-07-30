@@ -13,7 +13,7 @@ from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 from fastapi.responses import StreamingResponse
-from openai import AsyncOpenAI
+from openai import AsyncOpenAI, BadRequestError
 from PIL import Image
 from starlette.concurrency import run_in_threadpool
 
@@ -62,6 +62,11 @@ router = APIRouter()
 logger = logging.getLogger(__name__)
 
 _chat_client = AsyncOpenAI(base_url=settings.VLLM_BASE_URL, api_key="sk-no-key")
+
+# Successively smaller image counts tried when a grounded prompt overflows the
+# served context. The list is truncated from the end, which drops retrieved
+# patch previews before the overview quadrants and the overview itself.
+_IMAGE_SHED_STEPS = (6, 3, 1, 0)
 _ARTIFACT_IMAGE_KINDS = {"overview", "thumbnail", "patch_preview"}
 
 
@@ -1073,6 +1078,55 @@ async def _load_authorized_context_images(
     return images
 
 
+def _is_context_overflow(exc: BaseException) -> bool:
+    return isinstance(exc, BadRequestError) and "context length" in str(exc).lower()
+
+
+async def _open_grounded_stream(
+    *,
+    system: str,
+    history: list[dict[str, str]],
+    text_part: dict[str, Any],
+    images: list[dict[str, Any]],
+) -> Any:
+    """Open the SARChat stream, shedding optional images if the prompt overflows.
+
+    Each individual part of this prompt is bounded, but their sum is not.
+    InternVL2.5 expands one image into as many as twelve 448px tiles plus a
+    thumbnail at 256 tokens each, so a full overview, its four quadrant samples
+    and the retrieved patch previews together can outgrow the served context on
+    a large scene. Images are ordered overview -> quadrants -> patches, so
+    truncating from the end sheds the most optional evidence first and keeps
+    scene-level context. A grounded answer from fewer images is worth far more
+    to the caller than the generic failure sentence it would otherwise persist.
+    """
+    counts = [len(images), *[n for n in _IMAGE_SHED_STEPS if n < len(images)]]
+    last_overflow: BadRequestError | None = None
+    for count in counts:
+        messages: list[dict[str, Any]] = [
+            {"role": "system", "content": system},
+            *history,
+            {"role": "user", "content": [text_part, *images[:count]]},
+        ]
+        try:
+            return await asyncio.wait_for(
+                _chat_client.chat.completions.create(
+                    model=settings.SARCHAT_MODEL_ID,
+                    messages=messages,
+                    stream=True,
+                    max_tokens=settings.M5_OUTPUT_MAX_TOKENS,
+                    temperature=0.2,
+                ),
+                timeout=settings.M5_GENERATION_TIMEOUT_SECONDS,
+            )
+        except BadRequestError as exc:
+            if not _is_context_overflow(exc):
+                raise
+            last_overflow = exc
+            logger.info("Grounded prompt exceeded context with %d image(s); retrying with fewer", count)
+    raise last_overflow if last_overflow is not None else RuntimeError("no grounded stream attempt was made")
+
+
 async def _conversation_history(conversation_id: UUID, current_user: CurrentUser) -> list[dict[str, str]]:
     response = await _execute(
         lambda: get_supabase()
@@ -1326,27 +1380,16 @@ async def stream_grounded_chat(
                 "say when no detector facts are available, and make no claim beyond a single acquisition. "
                 "For a narrow question, answer it first and then name the relevant evidence class. Refer to scene names or patch IDs when useful."
             )
-            user_content: list[dict[str, Any]] = [
-                {
-                    "type": "text",
-                    "text": (
-                        f"Question: {request.query}\n\n{_bounded_context_text(context)}\n\n"
-                        "When present, visual inputs are ordered as: full overview; north-west, north-east, "
-                        "south-west, and south-east overview quadrants; then optional retrieved patch previews."
-                    ),
-                },
-                *images,
-            ]
-            messages: list[dict[str, Any]] = [{"role": "system", "content": system}, *history, {"role": "user", "content": user_content}]
-            stream = await asyncio.wait_for(
-                _chat_client.chat.completions.create(
-                    model=settings.SARCHAT_MODEL_ID,
-                    messages=messages,
-                    stream=True,
-                    max_tokens=settings.M5_OUTPUT_MAX_TOKENS,
-                    temperature=0.2,
+            text_part: dict[str, Any] = {
+                "type": "text",
+                "text": (
+                    f"Question: {request.query}\n\n{_bounded_context_text(context)}\n\n"
+                    "When present, visual inputs are ordered as: full overview; north-west, north-east, "
+                    "south-west, and south-east overview quadrants; then optional retrieved patch previews."
                 ),
-                timeout=settings.M5_GENERATION_TIMEOUT_SECONDS,
+            }
+            stream = await _open_grounded_stream(
+                system=system, history=history, text_part=text_part, images=images
             )
             async for chunk in stream:
                 if chunk.choices and chunk.choices[0].delta.content:
