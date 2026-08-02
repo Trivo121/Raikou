@@ -232,6 +232,12 @@ class Settings(BaseSettings):
     INGEST_UPLOAD_DIR: str = "./data/uploads"
     SARCLIP_MODEL_NAME: str = "SARVLM"
     SARCLIP_MODEL_VERSION: str = "SARCLIP-GeoRS-ViT-L-14"
+    # BigEarthNet v2.0 Sentinel-1 land-cover context. Optional: a scene without
+    # calibration or without both polarisations simply records the block as
+    # unavailable rather than failing the pipeline.
+    LAND_COVER_CHECKPOINT_DIR: str = "/home/ubuntu/backend/models/BEN-resnet50-s1"
+    LAND_COVER_DEVICE: str | None = None
+    LAND_COVER_ENABLED: bool = True
 
     model_config = SettingsConfigDict(
         env_file=".env",

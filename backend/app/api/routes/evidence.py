@@ -828,6 +828,7 @@ async def _load_rag_context(
                 "acquisition_time": str(scene.get("acquisition_time") or "") or None,
                 "polarizations": [str(item)[:32] for item in list(scene.get("polarizations") or [])[:8]],
                 "land_water": record_context.get("land_water") if isinstance(record_context.get("land_water"), dict) else None,
+                "land_cover": record_context.get("land_cover") if isinstance(record_context.get("land_cover"), dict) else None,
                 "detector": _safe_detector_metadata(record_detector or fallback_detector),
                 "validated_detector_facts": detector_facts,
                 "detector_spatial_groups": _detector_spatial_groups(detector_facts, record),
@@ -939,6 +940,25 @@ def _bounded_context_text(context: dict[str, Any]) -> str:
                 "SCENE CONTEXT (heuristic, not segmentation): "
                 + json.dumps(land_water, separators=(",", ":"))
             )
+        land_cover = scene.get("land_cover")
+        if isinstance(land_cover, dict) and land_cover.get("status") == "available":
+            # Only in-domain classes reach the prompt. An out-of-domain block is
+            # a European label space applied where it does not apply, so putting
+            # it in front of the model would invite exactly the confident
+            # misreading the status flag exists to prevent.
+            lines.append(
+                "SCENE LAND COVER (multi-label context, not segmentation, not detector evidence): "
+                + json.dumps(
+                    {
+                        "classes": land_cover.get("classes"),
+                        "windows_scored": land_cover.get("windows_scored"),
+                        "reported_macro_average_precision": (
+                            (land_cover.get("provenance") or {}).get("reported_metrics") or {}
+                        ).get("average_precision_macro"),
+                    },
+                    separators=(",", ":"),
+                )
+            )
         detector = scene.get("detector")
         if isinstance(detector, dict) and detector:
             lines.append("DETECTOR PROVENANCE: " + json.dumps(detector, separators=(",", ":")))
@@ -1003,6 +1023,7 @@ def _scene_first_answer(
         return environment_answer(
             query,
             scene.get("land_water") if isinstance(scene.get("land_water"), dict) else None,
+            scene.get("land_cover") if isinstance(scene.get("land_cover"), dict) else None,
         )
     return None
 

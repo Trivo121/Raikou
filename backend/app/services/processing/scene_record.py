@@ -54,6 +54,7 @@ def build_scene_record(
     with rasterio.open(vrt_path) as dataset:
         scene = _scene_details(dataset, session_id, scene_metadata)
         land_water = _estimate_land_water_context(dataset)
+        land_cover = _estimate_land_cover(dataset, scene_metadata)
         raw_detections, detector, validation_errors = _read_detector_results(
             detector_results_path,
             width=dataset.width,
@@ -84,13 +85,14 @@ def build_scene_record(
         "session_id": session_id,
         "generated_at": datetime.now(timezone.utc).isoformat(),
         "scene": scene,
-        "context": {"land_water": land_water},
+        "context": {"land_water": land_water, "land_cover": land_cover},
         "detector": detector,
         "objects": objects,
         "supporting_crops": crops,
         "limitations": [
             "Object entries originate only from the configured detector output; no VLM text is used as a detection.",
             "The land/water estimate is a backscatter heuristic, not a calibrated semantic-segmentation result.",
+            "Land cover is multi-label scene context from a classifier trained on European CORINE labels; it is not a segmentation and is not detector evidence.",
             "A single SAR acquisition supports observations of returns and geometry, not vessel identity or activity intent.",
         ],
     }
@@ -205,6 +207,118 @@ def _estimate_land_water_context(
         "is_calibrated_confidence": False,
         "review_required": True,
     }
+
+
+def _estimate_land_cover(
+    dataset: rasterio.io.DatasetReader,
+    scene_metadata: dict[str, Any],
+) -> dict[str, Any]:
+    """Attach BigEarthNet land-cover context when the scene can support it.
+
+    Requires both polarisations and the sigmaNought LUTs parsed at ingestion:
+    the classifier was trained on calibrated decibels, so running it on raw
+    digital numbers would produce confident nonsense rather than a weaker
+    result.  Any shortfall is recorded as an unavailable block instead of
+    raising, because land cover is context and must never fail a scene.
+    """
+    from app.core.config import settings
+    from app.services.models import land_cover as land_cover_module
+
+    if not settings.LAND_COVER_ENABLED:
+        return land_cover_module.build_land_cover_block(
+            None, unavailable_reason="land-cover estimation is disabled by configuration"
+        )
+
+    domain = land_cover_module.assess_domain(*_scene_centroid(dataset, scene_metadata))
+    calibration_payload = (scene_metadata.get("calibration") or {}).get("polarizations") or {}
+    if not calibration_payload:
+        return land_cover_module.build_land_cover_block(
+            None,
+            domain=domain,
+            unavailable_reason=(
+                "no sigmaNought calibration LUT for this scene; the classifier "
+                "requires calibrated sigma nought in dB"
+            ),
+        )
+
+    try:
+        calibration = {
+            polarisation: land_cover_module.SigmaNoughtLUT.from_dict(payload)
+            for polarisation, payload in calibration_payload.items()
+        }
+        result = land_cover_module.classify_scene(
+            dataset,
+            calibration,
+            checkpoint_dir=settings.LAND_COVER_CHECKPOINT_DIR,
+            device=settings.LAND_COVER_DEVICE,
+        )
+    except land_cover_module.LandCoverUnavailable as exc:
+        return land_cover_module.build_land_cover_block(
+            None, domain=domain, unavailable_reason=str(exc)
+        )
+    except Exception as exc:
+        logger.warning("Land-cover estimation failed: %s", exc, exc_info=True)
+        return land_cover_module.build_land_cover_block(
+            None, domain=domain, unavailable_reason="land-cover estimation failed"
+        )
+    return land_cover_module.build_land_cover_block(result, domain=domain)
+
+
+def _scene_centroid(
+    dataset: rasterio.io.DatasetReader,
+    scene_metadata: dict[str, Any],
+) -> tuple[float | None, float | None]:
+    """Locate the scene, falling back to the SAFE manifest footprint.
+
+    A Sentinel-1 GRD measurement band is distributed in radar geometry with no
+    CRS, so the raster alone cannot place the scene and the georeferenced path
+    below returns nothing for exactly the products that matter most here.  The
+    manifest footprint is the reliable source for those.
+    """
+    longitude, latitude = _scene_centroid_wgs84(dataset)
+    if longitude is not None and latitude is not None:
+        return longitude, latitude
+    return _footprint_centroid(scene_metadata.get("bounding_box"))
+
+
+def _footprint_centroid(bounding_box: Any) -> tuple[float | None, float | None]:
+    """Average the manifest footprint, which lists space-separated 'lat,lon' corners."""
+    if not isinstance(bounding_box, str) or not bounding_box.strip():
+        return None, None
+    latitudes: list[float] = []
+    longitudes: list[float] = []
+    for corner in bounding_box.split():
+        parts = corner.split(",")
+        if len(parts) != 2:
+            continue
+        try:
+            latitude, longitude = float(parts[0]), float(parts[1])
+        except ValueError:
+            continue
+        if -90.0 <= latitude <= 90.0 and -180.0 <= longitude <= 180.0:
+            latitudes.append(latitude)
+            longitudes.append(longitude)
+    if not latitudes:
+        return None, None
+    return sum(longitudes) / len(longitudes), sum(latitudes) / len(latitudes)
+
+
+def _scene_centroid_wgs84(
+    dataset: rasterio.io.DatasetReader,
+) -> tuple[float | None, float | None]:
+    if not dataset.crs:
+        return None, None
+    bounds = dataset.bounds
+    center_x = (bounds.left + bounds.right) / 2.0
+    center_y = (bounds.top + bounds.bottom) / 2.0
+    try:
+        from rasterio.warp import transform
+
+        longitude, latitude = transform(dataset.crs, "EPSG:4326", [center_x], [center_y])
+        return float(longitude[0]), float(latitude[0])
+    except Exception as exc:
+        logger.warning("Could not compute scene centroid: %s", exc)
+        return None, None
 
 
 def _indeterminate_land_water(reason: str) -> dict[str, Any]:

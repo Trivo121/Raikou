@@ -189,22 +189,87 @@ def detector_answer(
     )
 
 
-def environment_answer(query: str, land_water: dict[str, Any] | None) -> str:
-    """Give a conservative answer for a requested land-cover/environment class."""
+def environment_answer(
+    query: str,
+    land_water: dict[str, Any] | None,
+    land_cover: dict[str, Any] | None = None,
+) -> str:
+    """Answer an environment question, preferring land cover over the heuristic.
+
+    A calibrated land-cover estimate is a strictly better basis for this
+    question than the backscatter heuristic, so it wins when it is usable.  It
+    is only usable when the scene sits inside the classifier's training domain:
+    a block marked ``out_of_domain`` is not a weaker signal to be hedged, it is
+    a European label space applied where no correct answer exists, so it is
+    reported as unusable and the heuristic answers instead.
+    """
     normalized_query = query.casefold()
     requested = next((term for term in _ENVIRONMENT_TERMS if term in normalized_query), "that environment class")
-    context = land_water if isinstance(land_water, dict) else {}
-    label = str(context.get("label") or "indeterminate")
-    if label == "likely_water_dominant":
-        context_text = "The scene's low-backscatter heuristic is water-dominant."
-    elif label == "likely_land_dominant":
-        context_text = "The scene's low-backscatter heuristic is land-dominant."
-    elif label == "mixed_or_indeterminate":
-        context_text = "The scene's land/water heuristic is mixed or indeterminate."
-    else:
-        context_text = "No usable land/water context estimate is available."
+
+    cover = land_cover if isinstance(land_cover, dict) else {}
+    classes = [item for item in (cover.get("classes") or []) if isinstance(item, dict)]
+    if cover.get("status") == "available" and classes:
+        return _land_cover_answer(requested, cover, classes)
+
+    heuristic = _land_water_sentence(land_water)
+    domain = cover.get("domain") or {}
+    if cover.get("status") == "out_of_domain":
+        return (
+            f"I cannot confirm {requested} from the current evidence. This scene lies outside the "
+            f"training footprint of Raikou's only land-cover model ({domain.get('training_region', 'its training region')}, "
+            f"{domain.get('label_space', 'a regional label space')}), so its classes do not describe this location and "
+            f"are withheld rather than reported. {heuristic} It is only a backscatter heuristic, "
+            "not land-cover classification."
+        )
+    if cover.get("status") == "domain_unverified":
+        return (
+            f"I cannot confirm {requested} from the current evidence. Raikou's land-cover model is only "
+            f"valid inside {domain.get('training_region', 'its training region')}, and this scene carries no "
+            "georeference to check that against, so its classes are withheld rather than reported as if they "
+            f"applied. {heuristic} It is only a backscatter heuristic, not land-cover classification."
+        )
     return (
         f"I cannot confirm {requested} from the current evidence. Raikou has no calibrated {requested} "
         "segmentation or validated detector for this scene, and a SARCLIP patch cannot establish it. "
-        f"{context_text} It is only a backscatter heuristic, not land-cover classification."
+        f"{heuristic} It is only a backscatter heuristic, not land-cover classification."
     )
+
+
+def _land_cover_answer(
+    requested: str,
+    cover: dict[str, Any],
+    classes: list[dict[str, Any]],
+) -> str:
+    named = ", ".join(
+        "{} (confident across {:.0%} of sampled windows)".format(
+            str(item.get("label")), float(item.get("present_in_window_fraction") or 0.0)
+        )
+        for item in classes[:4]
+    )
+    metrics = ((cover.get("provenance") or {}).get("reported_metrics") or {})
+    macro_ap = metrics.get("average_precision_macro")
+    accuracy_text = (
+        f" The model reports {float(macro_ap):.2f} macro average precision on its own benchmark,"
+        " so treat weak or absent classes as inconclusive rather than as evidence of absence."
+        if isinstance(macro_ap, (int, float))
+        else ""
+    )
+    return (
+        f"Scene-level land cover for this scene: {named}. That is multi-label scene context, "
+        f"not a segmentation: it indicates what the scene broadly contains, not where a boundary lies, "
+        f"and it is not detector evidence for any object.{accuracy_text} "
+        f"Whether that answers your question about {requested} is a judgement the classes above should "
+        "support explicitly, not by inference."
+    )
+
+
+def _land_water_sentence(land_water: dict[str, Any] | None) -> str:
+    context = land_water if isinstance(land_water, dict) else {}
+    label = str(context.get("label") or "indeterminate")
+    if label == "likely_water_dominant":
+        return "The scene's low-backscatter heuristic is water-dominant."
+    if label == "likely_land_dominant":
+        return "The scene's low-backscatter heuristic is land-dominant."
+    if label == "mixed_or_indeterminate":
+        return "The scene's land/water heuristic is mixed or indeterminate."
+    return "No usable land/water context estimate is available."
