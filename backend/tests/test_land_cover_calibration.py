@@ -20,6 +20,7 @@ from app.services.ingestion.calibration import (
     dn_to_sigma0_db,
     parse_calibration_xml,
 )
+from app.services.ingestion.file_ingestion import extract_metadata
 from app.services.models.land_cover import (
     BEN19_LABELS,
     BEN_S1_MEAN_DB,
@@ -143,6 +144,33 @@ def test_calibration_members_excludes_the_noise_luts() -> None:
     assert calibration_members(names) == [
         "S1.SAFE/annotation/calibration/calibration-s1a-iw-grd-vv-001.xml"
     ]
+
+
+def test_extracted_metadata_summarises_calibration_without_embedding_the_lut() -> None:
+    import json
+    import zipfile
+
+    buffer = io.BytesIO()
+    with zipfile.ZipFile(buffer, "w") as archive:
+        archive.writestr("S1.SAFE/manifest.safe", "<x><productType>GRD</productType></x>")
+        archive.writestr(
+            "S1.SAFE/annotation/calibration/calibration-s1a-iw-grd-vv-001.xml", CALIBRATION_XML
+        )
+
+    with zipfile.ZipFile(buffer) as archive:
+        metadata = extract_metadata(archive)
+
+    calibration = metadata["calibration"]
+    assert calibration["available_polarizations"] == ["VV"]
+    assert calibration["node_grid"]["VV"] == {"azimuth_lines": 2, "range_pixels": 2}
+    # The metadata dict is merged into the scenes.metadata jsonb column and
+    # re-read on every scene load. A real IW GRD LUT pair is ~342 KB, so the
+    # node grids must never be embedded here.
+    serialised = json.dumps(calibration)
+    assert '"sigma_nought"' not in serialised
+    assert '"lines"' not in serialised
+    assert '"pixels"' not in serialised
+    assert len(json.dumps(metadata)) < 4096
 
 
 def test_normalization_puts_training_mean_at_zero() -> None:

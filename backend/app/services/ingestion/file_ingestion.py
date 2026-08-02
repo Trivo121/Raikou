@@ -103,6 +103,12 @@ def extract_metadata(zip_ref: zipfile.ZipFile) -> dict:
     # Radiometric calibration: a GRD measurement band holds digital numbers, so
     # every downstream consumer that reasons in decibels needs the sigmaNought
     # LUT to reach real backscatter.  Absent for a generic zipped GeoTIFF.
+    #
+    # Only a summary goes in the metadata dict.  This dict is merged into the
+    # scenes.metadata jsonb column and is re-read on every scene load, while a
+    # single IW GRD LUT pair serialises to roughly 342 KB -- so the LUT itself
+    # is re-parsed on demand by `load_calibration_luts` from the archive the
+    # caller already has open.
     try:
         luts = load_calibration_luts(zip_ref)
     except Exception as exc:  # never fail ingestion over an optional annotation
@@ -111,7 +117,14 @@ def extract_metadata(zip_ref: zipfile.ZipFile) -> dict:
     if luts:
         metadata['calibration'] = {
             "method": "sentinel1_sigma_nought_lut",
-            "polarizations": {pol: lut.to_dict() for pol, lut in luts.items()},
+            "available_polarizations": sorted(luts),
+            "absolute_calibration_constant": {
+                pol: lut.absolute_calibration_constant for pol, lut in luts.items()
+            },
+            "node_grid": {
+                pol: {"azimuth_lines": int(lut.lines.size), "range_pixels": int(lut.pixels.size)}
+                for pol, lut in luts.items()
+            },
         }
 
     return metadata

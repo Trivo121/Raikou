@@ -39,6 +39,7 @@ def build_scene_record(
     vrt_path: str,
     scene_metadata: dict[str, Any],
     detector_results_path: str | None = None,
+    calibration: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Build and atomically persist the canonical scene record.
 
@@ -54,7 +55,7 @@ def build_scene_record(
     with rasterio.open(vrt_path) as dataset:
         scene = _scene_details(dataset, session_id, scene_metadata)
         land_water = _estimate_land_water_context(dataset)
-        land_cover = _estimate_land_cover(dataset, scene_metadata)
+        land_cover = _estimate_land_cover(dataset, scene_metadata, calibration)
         raw_detections, detector, validation_errors = _read_detector_results(
             detector_results_path,
             width=dataset.width,
@@ -212,14 +213,17 @@ def _estimate_land_water_context(
 def _estimate_land_cover(
     dataset: rasterio.io.DatasetReader,
     scene_metadata: dict[str, Any],
+    calibration: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Attach BigEarthNet land-cover context when the scene can support it.
 
-    Requires both polarisations and the sigmaNought LUTs parsed at ingestion:
-    the classifier was trained on calibrated decibels, so running it on raw
-    digital numbers would produce confident nonsense rather than a weaker
-    result.  Any shortfall is recorded as an unavailable block instead of
-    raising, because land cover is context and must never fail a scene.
+    Requires both polarisations and the sigmaNought LUTs: the classifier was
+    trained on calibrated decibels, so running it on raw digital numbers would
+    produce confident nonsense rather than a weaker result.  The LUTs are
+    supplied by the caller rather than read from ``scene_metadata`` because they
+    are far too large to live in the scene's metadata row.  Any shortfall is
+    recorded as an unavailable block instead of raising, because land cover is
+    context and must never fail a scene.
     """
     from app.core.config import settings
     from app.services.models import land_cover as land_cover_module
@@ -230,8 +234,7 @@ def _estimate_land_cover(
         )
 
     domain = land_cover_module.assess_domain(*_scene_centroid(dataset, scene_metadata))
-    calibration_payload = (scene_metadata.get("calibration") or {}).get("polarizations") or {}
-    if not calibration_payload:
+    if not calibration:
         return land_cover_module.build_land_cover_block(
             None,
             domain=domain,
@@ -242,13 +245,17 @@ def _estimate_land_cover(
         )
 
     try:
-        calibration = {
-            polarisation: land_cover_module.SigmaNoughtLUT.from_dict(payload)
-            for polarisation, payload in calibration_payload.items()
+        luts = {
+            polarisation: (
+                value
+                if isinstance(value, land_cover_module.SigmaNoughtLUT)
+                else land_cover_module.SigmaNoughtLUT.from_dict(value)
+            )
+            for polarisation, value in calibration.items()
         }
         result = land_cover_module.classify_scene(
             dataset,
-            calibration,
+            luts,
             checkpoint_dir=settings.LAND_COVER_CHECKPOINT_DIR,
             device=settings.LAND_COVER_DEVICE,
         )

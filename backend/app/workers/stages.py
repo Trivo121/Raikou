@@ -12,6 +12,7 @@ from datetime import datetime, timezone
 import gzip
 from hashlib import sha256
 import json
+import logging
 from pathlib import Path
 import shutil
 from typing import Any
@@ -28,6 +29,7 @@ from rasterio.enums import Resampling
 
 from app.core.config import settings
 from app.services.cache.evidence import invalidate_project_evidence_cache_sync
+from app.services.ingestion.calibration import load_calibration_luts
 from app.services.ingestion.file_ingestion import _build_vrt, _build_vrt_local, extract_metadata
 from app.services.models.sarclip_encoder import EncodedPatch, ProgressUpdate, SARCLIPEncoder, encode_patch_stream
 from app.services.processing.patch_pipeline import PATCH_SIZE, _build_channels, extract_and_preprocess_patches
@@ -36,6 +38,9 @@ from app.services.storage.object_store import ObjectStorage, get_object_storage
 from app.services.storage.payloads import QdrantPatchPayload
 from app.services.storage.qdrant import QdrantStore
 from app.workers.repository import RetryableTaskError, UserFacingTaskError, WorkerRepository
+
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True, slots=True)
@@ -442,6 +447,29 @@ class M3Pipeline:
                                            model_name=settings.SARCLIP_MODEL_NAME, model_version=settings.SARCLIP_MODEL_VERSION)
         return {"indexed_vectors": indexed, "embedding_manifest_artifact_id": str(manifest["id"])}
 
+    def _calibration_luts(self, task: dict[str, Any], artifacts: list[dict[str, Any]]) -> dict[str, Any]:
+        """Parse sigmaNought LUTs from the source archive `_prepare_vrt` just downloaded.
+
+        The LUTs are read here rather than carried in the scene metadata because
+        one IW GRD pair serialises to roughly 342 KB, which has no business in a
+        jsonb column that is re-read on every scene load.  A scene with no
+        archive, or a generic zipped GeoTIFF, simply has no calibration.
+        """
+        source_dir = self._workdir(task) / "sources"
+        for artifact in artifacts:
+            if artifact.get("kind") != "source_archive":
+                continue
+            path = source_dir / f"{artifact['id']}-{Path(str(artifact['storage_key'])).name}"
+            if not path.exists():
+                continue
+            try:
+                with zipfile.ZipFile(path, "r") as handle:
+                    return load_calibration_luts(handle)
+            except (OSError, ValueError, zipfile.BadZipFile) as exc:
+                logger.warning("Could not read calibration from %s: %s", path.name, exc)
+                return {}
+        return {}
+
     def _build_evidence(self, task: dict[str, Any]) -> dict[str, Any]:
         vrt_path, metadata, artifacts = self._prepare_vrt(task)
         workdir = self._workdir(task)
@@ -459,7 +487,8 @@ class M3Pipeline:
             detector_artifact_id = str(detector_artifact["id"])
         try:
             record = build_scene_record(session_id=str(task["scene_id"]), session_dir=str(workdir), vrt_path=str(vrt_path),
-                                        scene_metadata=metadata, detector_results_path=str(detector_path) if detector_path else None)
+                                        scene_metadata=metadata, detector_results_path=str(detector_path) if detector_path else None,
+                                        calibration=self._calibration_luts(task, artifacts))
         except (OSError, ValueError, rasterio.errors.RasterioError) as exc:
             raise UserFacingTaskError("EVIDENCE_BUILD_FAILED", "The detector-backed evidence record could not be created.") from exc
         caption = self._caption_overview(task)
