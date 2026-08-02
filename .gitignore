@@ -69,7 +69,11 @@ MANIFEST
 
 #folders
 SARVLM/
-models/
+# Downloaded model weights, not the app.services.models source package: an
+# unanchored "models/" matches any directory of that name at any depth, which
+# silently made every new file under backend/app/services/models/ unaddable.
+/models/
+/backend/models/
 
 # Supabase CLI local artifacts
 supabase/.temp/
