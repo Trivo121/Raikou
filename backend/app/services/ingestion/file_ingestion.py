@@ -1,3 +1,4 @@
+import logging
 import zipfile
 import xml.etree.ElementTree as ET
 # pyrefly: ignore [missing-import]
@@ -8,7 +9,10 @@ import uuid
 import rasterio
 import json
 from typing import List
+from app.services.ingestion.calibration import load_calibration_luts
 from app.services.session_cache import get_session_dir, touch_session
+
+logger = logging.getLogger(__name__)
 
 def validate_zip_is_grd(zip_ref: zipfile.ZipFile) -> bool:
     manifest_info = None
@@ -70,13 +74,22 @@ def extract_metadata(zip_ref: zipfile.ZipFile) -> dict:
                     if elem.text not in metadata['polarization']:
                         metadata['polarization'].append(elem.text)
                         
-    # Find annotation file for incidence angle
-    anno_files = [f for f in zip_ref.filelist if '/annotation/' in f.filename and f.filename.endswith('.xml')]
+    # Find the product annotation for incidence angle.  ``/annotation/`` also
+    # contains the ``calibration/`` and ``rfi/`` subdirectories, whose XML
+    # carries no incidenceAngle at all; picking the first match indiscriminately
+    # selected a calibration annotation and left the angle permanently null.
+    anno_files = [
+        f for f in zip_ref.filelist
+        if '/annotation/' in f.filename
+        and f.filename.endswith('.xml')
+        and '/annotation/calibration/' not in f.filename
+        and '/annotation/rfi/' not in f.filename
+    ]
     if anno_files:
         with zip_ref.open(anno_files[0]) as f:
             anno_tree = ET.parse(f)
             anno_root = anno_tree.getroot()
-            
+
             angles = []
             for elem in anno_root.iter():
                 if elem.tag == 'incidenceAngle' and elem.text:
@@ -86,7 +99,21 @@ def extract_metadata(zip_ref: zipfile.ZipFile) -> dict:
                         pass
             if angles:
                 metadata['incidence_angle'] = round(sum(angles) / len(angles), 2)
-                
+
+    # Radiometric calibration: a GRD measurement band holds digital numbers, so
+    # every downstream consumer that reasons in decibels needs the sigmaNought
+    # LUT to reach real backscatter.  Absent for a generic zipped GeoTIFF.
+    try:
+        luts = load_calibration_luts(zip_ref)
+    except Exception as exc:  # never fail ingestion over an optional annotation
+        logger.warning("Could not read calibration annotations: %s", exc)
+        luts = {}
+    if luts:
+        metadata['calibration'] = {
+            "method": "sentinel1_sigma_nought_lut",
+            "polarizations": {pol: lut.to_dict() for pol, lut in luts.items()},
+        }
+
     return metadata
 
 def _build_vrt(zip_path: str, tiff_paths: list[str]) -> str:
