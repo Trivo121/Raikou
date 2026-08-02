@@ -55,6 +55,11 @@ from app.services.processing.chat_policy import (
     detector_answer,
     environment_answer,
 )
+from app.services.processing.scene_geography import (
+    footprint_payload,
+    format_coordinate,
+    parse_footprint,
+)
 from app.services.storage.object_store import ObjectStorageError, get_object_storage
 from app.services.storage.qdrant import QdrantStore
 
@@ -827,6 +832,7 @@ async def _load_rag_context(
                 "sensor": _bounded_text(scene.get("sensor"), 128),
                 "acquisition_time": str(scene.get("acquisition_time") or "") or None,
                 "polarizations": [str(item)[:32] for item in list(scene.get("polarizations") or [])[:8]],
+                "geography": _scene_geography(scene, record),
                 "land_water": record_context.get("land_water") if isinstance(record_context.get("land_water"), dict) else None,
                 "land_cover": record_context.get("land_cover") if isinstance(record_context.get("land_cover"), dict) else None,
                 "detector": _safe_detector_metadata(record_detector or fallback_detector),
@@ -934,6 +940,11 @@ def _bounded_context_text(context: dict[str, Any]) -> str:
                 polarizations=", ".join(scene.get("polarizations") or []) or "unknown",
             )
         )
+        geography = scene.get("geography")
+        if isinstance(geography, dict) and geography:
+            # A GRD band has no CRS, so without this the model has no way to know
+            # where the scene is and cannot answer "where is this" at all.
+            lines.append("SCENE GEOGRAPHY: " + json.dumps(geography, separators=(",", ":")))
         land_water = scene.get("land_water")
         if isinstance(land_water, dict):
             lines.append(
@@ -992,6 +1003,37 @@ def _bounded_context_text(context: dict[str, Any]) -> str:
                 )
             )
     return "\n".join(lines)[: settings.M5_MAX_CONTEXT_CHARS]
+
+
+def _scene_geography(scene: dict[str, Any], record: dict[str, Any]) -> dict[str, Any] | None:
+    """Where the scene is and how it was imaged, from the two sources that carry it.
+
+    The footprint and orbit direction live on the scenes row.  The incidence angle
+    is read from the scene record first: ingestion's annotation glob matched the
+    calibration/ subdirectory and wrote null for every SAFE product until that was
+    fixed, so the row is stale for already-ingested scenes while the record is
+    rebuilt from freshly extracted metadata.
+    """
+    scene_metadata = scene.get("metadata") if isinstance(scene.get("metadata"), dict) else {}
+    record_scene = record.get("scene") if isinstance(record.get("scene"), dict) else {}
+    record_metadata = record_scene.get("metadata") if isinstance(record_scene.get("metadata"), dict) else {}
+
+    payload: dict[str, Any] = {}
+    footprint = footprint_payload(parse_footprint(scene_metadata.get("bounding_box")))
+    if footprint is not None:
+        payload["footprint"] = footprint
+    incidence = record_metadata.get("incidence_angle")
+    if not isinstance(incidence, (int, float)):
+        incidence = scene_metadata.get("incidence_angle")
+    if isinstance(incidence, (int, float)):
+        payload["incidence_angle_deg"] = round(float(incidence), 2)
+    orbit = scene_metadata.get("orbit_direction")
+    if isinstance(orbit, str) and orbit.strip():
+        payload["orbit_direction"] = orbit.strip().lower()
+    raster = record_scene.get("raster") if isinstance(record_scene.get("raster"), dict) else {}
+    if isinstance(raster.get("width_px"), int) and isinstance(raster.get("height_px"), int):
+        payload["raster_px"] = [raster["width_px"], raster["height_px"]]
+    return payload or None
 
 
 def _selected_scene_context(context: dict[str, Any], scene_id: UUID) -> dict[str, Any] | None:
@@ -1133,7 +1175,6 @@ _OBSERVATION_TASK = (
     "3. Texture (uniform / varied):\n"
     "4. Boundaries between regions (smooth / irregular / none):"
 )
-_OBSERVATION_LABELS = ("Overall brightness", "Both bright and dark regions", "Texture", "Region boundaries")
 
 
 async def _visual_observations(overview_image: dict[str, Any] | None) -> list[str]:
@@ -1178,52 +1219,196 @@ async def _visual_observations(overview_image: dict[str, Any] | None) -> list[st
     return answers[:4]
 
 
+def _describe_acquisition(scene: dict[str, Any]) -> str:
+    """The opening sentence: what imaged this, when, and how."""
+    sensor = scene.get("sensor") or "Unknown sensor"
+    polarizations = list(scene.get("polarizations") or [])
+    geography = scene.get("geography") if isinstance(scene.get("geography"), dict) else {}
+
+    parts = [f"{sensor} scene"]
+    acquisition = str(scene.get("acquisition_time") or "").strip()
+    if acquisition:
+        # Trim the microseconds a database timestamp carries; nobody reads them.
+        parts.append(f"acquired {acquisition.replace('T', ' ')[:16]} UTC")
+    orbit = geography.get("orbit_direction")
+    if isinstance(orbit, str) and orbit:
+        parts.append(f"{orbit} pass")
+    if polarizations:
+        parts.append(f"{'/'.join(polarizations)} polarisation")
+    return ", ".join(parts) + "."
+
+
+def _describe_geography(scene: dict[str, Any]) -> str | None:
+    """Where on Earth the scene sits, and how much ground it covers."""
+    geography = scene.get("geography") if isinstance(scene.get("geography"), dict) else {}
+    if not geography:
+        return None
+    footprint = geography.get("footprint")
+    sentence = None
+    if isinstance(footprint, dict):
+        centroid = footprint.get("centroid") or {}
+        extent = footprint.get("ground_extent_km") or []
+        latitude, longitude = centroid.get("latitude"), centroid.get("longitude")
+        if isinstance(latitude, (int, float)) and isinstance(longitude, (int, float)):
+            sentence = f"Centred {format_coordinate(float(latitude), float(longitude))}"
+            if len(extent) == 2:
+                sentence += f", covering roughly {extent[0]:,} x {extent[1]:,} km"
+    incidence = geography.get("incidence_angle_deg")
+    if isinstance(incidence, (int, float)):
+        angle = f"imaged at a {float(incidence):.0f}° incidence angle"
+        sentence = f"{sentence}, {angle}" if sentence else angle.capitalize()
+    return f"{sentence}." if sentence else None
+
+
+def _describe_land_water(land_water: dict[str, Any]) -> str | None:
+    """The land/water split as a sentence rather than a serialized dict."""
+    land = land_water.get("land_fraction_estimate")
+    water = land_water.get("water_fraction_estimate")
+    if not (isinstance(land, (int, float)) and isinstance(water, (int, float))):
+        return None
+    sentence = (
+        f"Around {land * 100:.0f}% of the scene returns land-like backscatter "
+        f"and {water * 100:.0f}% water-like"
+    )
+    qualifier = {
+        "likely_land_dominant": ", so it reads as land-dominant",
+        "likely_water_dominant": ", so it reads as water-dominant",
+        "mixed_or_indeterminate": ", though the split is not clean enough to call either way",
+    }.get(str(land_water.get("label") or ""), "")
+    return f"{sentence}{qualifier}. This is a brightness threshold, not a coastline map."
+
+
+def _describe_land_cover(land_cover: dict[str, Any]) -> str | None:
+    """Land cover, or a plain reason it is being withheld."""
+    status = str(land_cover.get("status") or "")
+    if status == "available":
+        classes = [
+            item for item in (land_cover.get("classes") or [])
+            if isinstance(item, dict) and isinstance(item.get("label"), str)
+        ]
+        if not classes:
+            return "No land-cover class passed the model's confidence threshold for this scene."
+        named = "; ".join(
+            f"{item['label']} across {float(item.get('present_in_window_fraction') or 0.0) * 100:.0f}% of sampled windows"
+            for item in classes[:4]
+        )
+        return (
+            f"Land cover suggests {named}. That is multi-label scene context rather than a "
+            "segmentation, so it says what the scene contains, not where."
+        )
+    if status == "out_of_domain":
+        return (
+            "Land cover is withheld here: the only available classifier was trained on European "
+            "CORINE classes, which do not describe this location."
+        )
+    if status == "domain_unverified":
+        return (
+            "Land cover is withheld here: this scene's location could not be verified, and the "
+            "only available classifier is valid for Europe alone."
+        )
+    reason = land_cover.get("unavailable_reason")
+    if isinstance(reason, str) and reason.strip():
+        return f"Land cover is unavailable for this scene: {reason.strip()}"
+    return None
+
+
+def _describe_observations(observations: list[str]) -> str | None:
+    """Fold the captioner's four fixed answers into one sentence.
+
+    The probe is asked four fixed questions, so answers arrive positionally and
+    two of them are yes/no.  Rendering them as "label: value" produced lines like
+    "Both bright and dark regions: no" -- a shape nobody writes, and the reason
+    this block read as debug output rather than an answer.
+    """
+    values = [str(value).strip().lower().rstrip(".") for value in (observations or [])[:4]]
+    if not any(values):
+        return None
+    clauses: list[str] = []
+    if len(values) > 0 and values[0]:
+        clauses.append(f"the scene reads as {values[0]} overall")
+    if len(values) > 1 and values[1]:
+        clauses.append(
+            "with both bright and dark regions present"
+            if values[1].startswith("y")
+            else "without strong bright-dark contrast"
+        )
+    if len(values) > 2 and values[2]:
+        clauses.append(f"{values[2]} in texture")
+    if len(values) > 3 and values[3]:
+        # Question 4 offers "none" as an answer, which does not survive being
+        # dropped into "with {value} region boundaries".
+        clauses.append(
+            "with no clear region boundaries"
+            if values[3] == "none"
+            else f"with {values[3]} region boundaries"
+        )
+    return (
+        "A visual probe of the downscaled overview finds "
+        + ", ".join(clauses)
+        + ". At that scale nothing vessel-sized is resolvable, so these are impressions "
+        "rather than detections."
+    )
+
+
 def _compose_scene_description(*, context: dict[str, Any], scene_id: UUID, observations: list[str]) -> str:
-    """Build the scene answer from authorized evidence, not from model prose."""
+    """Build the scene answer from authorized evidence, not from model prose.
+
+    Written as prose rather than a field dump.  The previous form serialized the
+    land/water dict verbatim -- "backscatter_threshold_db=20.3345,
+    is_calibrated_confidence=False" -- and repeated a caveat on every line, which
+    is how a reader learns to skip all of them, including the one that matters.
+    Every sentence here still traces to an authorized field and no claim was
+    added; only the presentation changed.
+    """
     scene = _selected_scene_context(context, scene_id) or {}
     facts = scene.get("validated_detector_facts") or []
-    lines = ["Scene context"]
-    lines.append(
-        f"- {scene.get('sensor') or 'Unknown sensor'}, polarizations "
-        f"{', '.join(scene.get('polarizations') or []) or 'unknown'}, acquired "
-        f"{scene.get('acquisition_time') or 'unknown'}."
-    )
+
+    opening = [_describe_acquisition(scene)]
+    geography = _describe_geography(scene)
+    if geography:
+        opening.append(geography)
+    paragraphs = [" ".join(opening)]
+
     land_water = scene.get("land_water")
     if isinstance(land_water, dict) and land_water:
-        summary = ", ".join(f"{key}={value}" for key, value in list(land_water.items())[:4])
-        lines.append(f"- Land/water estimate (backscatter heuristic, not segmentation): {summary}.")
-    lines.append("")
-    lines.append("Detector-backed objects")
+        described = _describe_land_water(land_water)
+        if described:
+            paragraphs.append(described)
+
     if facts:
         counts: dict[str, int] = {}
         for fact in facts:
             label = fact.get("label") if isinstance(fact, dict) else None
             if isinstance(label, str):
                 counts[label] = counts.get(label, 0) + 1
-        lines.append("- " + "; ".join(f"{label}: {count}" for label, count in sorted(counts.items())) + ".")
+        listed = "; ".join(f"{label} ({count})" for label, count in sorted(counts.items()))
+        paragraphs.append(f"Detector-confirmed objects: {listed}.")
     else:
-        lines.append(
-            "- None. No detector sidecar was supplied for this scene, so no object, count or "
-            "location can be confirmed. A missing detection is not proof of absence."
+        paragraphs.append(
+            "No detector has been run on this scene, so I cannot confirm any object, count or "
+            "position. That is an absence of evidence, not evidence of absence."
         )
-    lines.append("")
-    lines.append("Uncertain observations")
-    if observations:
-        for label, value in zip(_OBSERVATION_LABELS, observations):
-            lines.append(f"- {label}: {value}.")
-        lines.append(
-            "- These describe the heavily downscaled scene overview only, in which objects at "
-            "vessel scale are smaller than one pixel. They are not detections."
-        )
-    else:
-        lines.append("- No reliable visual observation could be obtained for this scene.")
+
+    land_cover = scene.get("land_cover")
+    if isinstance(land_cover, dict) and land_cover:
+        described = _describe_land_cover(land_cover)
+        if described:
+            paragraphs.append(described)
+
+    closing: list[str] = []
+    described = _describe_observations(observations)
+    if described:
+        closing.append(described)
     patches = context.get("patches") or []
     if patches:
-        lines.append(
-            f"- SARCLIP retrieved {len(patches)} similar patch preview(s) within this scope. "
-            "Embedding similarity is not object classification."
+        closing.append(
+            f"SARCLIP retrieved {len(patches)} visually similar patch(es) in this scope, ranked by "
+            "embedding similarity rather than classified."
         )
-    return "\n".join(lines)
+    if closing:
+        paragraphs.append(" ".join(closing))
+
+    return "\n\n".join(paragraphs)
 
 
 def _is_context_overflow(exc: BaseException) -> bool:
