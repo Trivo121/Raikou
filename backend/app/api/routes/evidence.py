@@ -814,6 +814,7 @@ async def _load_rag_context(
     citations: list[dict[str, Any]] = [card.citation.model_dump(mode="json") for card in search.cards]
     scene_context: list[dict[str, Any]] = []
     overview_artifact_ids: list[str] = []
+    scattering_map_artifact_ids: list[str] = []
     for scene_id in scene_ids:
         scene = scenes_by_id[scene_id]
         evidence = evidence_by_scene.get(scene_id)
@@ -901,6 +902,35 @@ async def _load_rag_context(
                 ).model_dump(mode="json")
             )
 
+        # The mechanism map is cited from the scene record rather than by a
+        # separate artifact query: the id was written into the block when the
+        # record was built, so the picture and the percentages can never come
+        # from different runs.
+        scattering = record_context.get("scattering") if isinstance(record_context.get("scattering"), dict) else None
+        descriptor = scattering.get("map") if isinstance(scattering, dict) and isinstance(scattering.get("map"), dict) else None
+        artifact_id = descriptor.get("artifact_id") if descriptor else None
+        if artifact_id:
+            scattering_map_artifact_ids.append(str(artifact_id))
+            citations.append(
+                EvidenceCitation(
+                    source_type="scattering_map",
+                    source_id=str(artifact_id),
+                    scene_id=UUID(scene_id),
+                    artifact_id=UUID(str(artifact_id)),
+                    why_provided=(
+                        "Scattering mechanism map rendered from calibrated VV/VH intensity. "
+                        "Surface geometry, not a land-use classification."
+                    ),
+                    provenance={
+                        "kind": "scattering_map",
+                        "ground_sampling_m": descriptor.get("ground_sampling_m"),
+                        "looks": descriptor.get("looks"),
+                        "geometry": descriptor.get("geometry"),
+                        "is_land_use_classification": False,
+                    },
+                ).model_dump(mode="json")
+            )
+
     patch_preview_ids = [str(card.preview_artifact.id) for card in search.cards if card.preview_artifact]
     context = {
         "citations": citations[:100],
@@ -918,6 +948,10 @@ async def _load_rag_context(
         # artifact row before private object bytes are read.
         "overview_artifact_ids": overview_artifact_ids,
         "patch_preview_artifact_ids": patch_preview_ids[: settings.M5_MAX_PATCH_IMAGES_PER_PROMPT],
+        # Cited and returned to the caller, but deliberately not fed to the
+        # captioner: it is a flat four-colour raster, and a 2B VLM asked to look
+        # at it will narrate shapes that are threshold boundaries.
+        "scattering_map_artifact_ids": scattering_map_artifact_ids,
     }
     await set_json_cache(
         cache_key,
@@ -1305,11 +1339,20 @@ def _describe_scattering(scattering: dict[str, Any]) -> str | None:
         "{:.0%} {}".format(float(item.get("fraction") or 0.0), item["description"])
         for item in ordered
     )
-    return (
+    sentence = (
         f"By scattering mechanism, measured from calibrated VV/VH intensity: {named}. "
         "This is set by surface geometry rather than by region, so it applies anywhere, "
         "but it describes a mechanism and not a land use."
     )
+    descriptor = scattering.get("map") if isinstance(scattering.get("map"), dict) else None
+    if descriptor and descriptor.get("artifact_id"):
+        sampling = descriptor.get("ground_sampling_m")
+        sentence += (
+            " A map of where each mechanism falls is attached"
+            + (f", at {float(sampling):.0f} m sampling" if isinstance(sampling, (int, float)) else "")
+            + ". It is in radar geometry and aligns with the scene overview, not with a map projection."
+        )
+    return sentence
 
 
 def _describe_land_cover(land_cover: dict[str, Any]) -> str | None:

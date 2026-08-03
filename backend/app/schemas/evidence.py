@@ -66,7 +66,17 @@ class EvidenceSearchRequest(BaseModel):
 class EvidenceCitation(BaseModel):
     """A durable explanation of exactly what was given to the model/client."""
 
-    source_type: Literal["patch", "overview", "metadata", "validated_detector_evidence", "model_observation"]
+    source_type: Literal[
+        "patch",
+        "overview",
+        "metadata",
+        "validated_detector_evidence",
+        "model_observation",
+        # A rendered measurement, not a model output and not detector evidence:
+        # its own source_type so a client can style it distinctly from an
+        # overview photograph and from a retrieved patch.
+        "scattering_map",
+    ]
     source_id: UUID | str
     scene_id: UUID
     artifact_id: UUID | None = None

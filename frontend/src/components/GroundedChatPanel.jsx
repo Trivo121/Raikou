@@ -1,6 +1,6 @@
 import { useMemo, useRef, useState } from 'react';
 import { useQuery, useQueryClient } from '@tanstack/react-query';
-import { AlertTriangle, Bot, FileImage, LoaderCircle, MessageSquare, Plus, Send, ShieldCheck } from 'lucide-react';
+import { AlertTriangle, Bot, FileImage, Layers, LoaderCircle, MessageSquare, Plus, Send, ShieldCheck } from 'lucide-react';
 
 function readable(value, fallback = 'Not available') {
   if (!value) return fallback;
@@ -10,6 +10,70 @@ function readable(value, fallback = 'Not available') {
 function formatDate(value) {
   const date = new Date(value);
   return Number.isNaN(date.getTime()) ? 'Unknown time' : new Intl.DateTimeFormat(undefined, { dateStyle: 'medium', timeStyle: 'short' }).format(date);
+}
+
+function findScatteringMap(citations) {
+  if (!Array.isArray(citations)) return null;
+  return citations.find((citation) => citation?.source_type === 'scattering_map' && citation?.artifact_id) || null;
+}
+
+// The mechanism map is rendered inline rather than behind a citation card: it is
+// the answer to "what is the rest of the scene", and a picture the reader has to
+// click to discover is a picture most readers never see. It stays clickable for
+// the full-size view.
+function ScatteringMapFigure({ api, citations, onOpenPreview }) {
+  const citation = useMemo(() => findScatteringMap(citations), [citations]);
+  const artifactId = citation?.artifact_id || null;
+  const previewQuery = useQuery({
+    queryKey: ['scattering-map-preview', artifactId],
+    enabled: Boolean(api && artifactId),
+    queryFn: ({ signal }) => api.artifacts.preview(artifactId, { signal }),
+    // The grant is short-lived and signed; refetch well before it expires
+    // rather than render a broken image.
+    staleTime: 60_000,
+    retry: 1,
+  });
+
+  if (!artifactId) return null;
+  const provenance = citation.provenance || {};
+  const sampling = Number(provenance.ground_sampling_m);
+  const url = previewQuery.data?.url;
+
+  return (
+    <figure className="mt-3 overflow-hidden rounded-lg border border-white/[0.08] bg-black/25">
+      <div className="flex items-center gap-1.5 border-b border-white/[0.07] px-3 py-2 text-[11px] font-semibold text-zinc-300">
+        <Layers size={12} className="text-emerald-300" />
+        Scattering mechanism map
+        <span className="ml-auto font-normal text-zinc-500">measurement, not classification</span>
+      </div>
+      {previewQuery.isPending && (
+        <div className="flex items-center gap-2 px-3 py-8 text-xs text-zinc-500">
+          <LoaderCircle size={13} className="animate-spin" /> Loading mechanism map...
+        </div>
+      )}
+      {previewQuery.isError && (
+        <div className="px-3 py-6 text-xs text-amber-200">
+          The mechanism map could not be loaded. The text result above is unaffected.
+        </div>
+      )}
+      {url && (
+        <button
+          type="button"
+          onClick={onOpenPreview ? () => onOpenPreview({ id: artifactId, kind: 'scattering_map' }) : undefined}
+          className="block w-full cursor-zoom-in"
+          title="Open full size"
+        >
+          <img src={url} alt="Scattering mechanism map of the scene" className="block w-full bg-[#121214]" loading="lazy" />
+        </button>
+      )}
+      <figcaption className="border-t border-white/[0.07] px-3 py-2 text-[11px] leading-5 text-zinc-500">
+        Surface geometry from calibrated VV/VH intensity after thermal-noise removal
+        {Number.isFinite(sampling) ? ` at ${Math.round(sampling)} m sampling` : ''}. Not a land-use
+        classification, and not detector evidence. Radar geometry: this aligns with the scene
+        overview, not with a map projection.
+      </figcaption>
+    </figure>
+  );
 }
 
 function CitationCards({ citations, onOpenPatch, onOpenPreview, onOpenScene }) {
@@ -134,9 +198,9 @@ export default function GroundedChatPanel({ api, userId, projectId, scenes, sele
         {messagesQuery.isLoading && <div className="flex items-center gap-2 text-sm text-zinc-500"><LoaderCircle size={15} className="animate-spin" /> Loading saved history…</div>}
         {messagesQuery.isError && <div className="rounded-lg border border-red-500/25 bg-red-500/[0.08] p-3 text-xs text-red-100">Could not load this conversation: {messagesQuery.error.message}</div>}
         {!conversationId && !streamText && <EmptyAsk />}
-        {(messagesQuery.data || []).map((message) => <article key={message.id} className={`max-w-3xl rounded-xl border p-4 ${message.role === 'user' ? 'ml-auto border-sky-400/20 bg-sky-400/[0.06]' : 'border-white/[0.08] bg-black/15'}`}><div className="flex items-center gap-2 text-xs font-semibold capitalize text-zinc-300"><Bot size={14} className={message.role === 'assistant' ? 'text-violet-300' : 'text-sky-300'} /> {message.role === 'assistant' ? 'Evidence-grounded response' : 'You'}</div><p className="mt-2 whitespace-pre-wrap text-sm leading-6 text-zinc-200">{message.content}</p>{message.role === 'assistant' && <CitationCards citations={message.citations} onOpenPatch={onOpenPatch} onOpenPreview={onOpenPreview} onOpenScene={onOpenScene} />}{message.status === 'failed' && <p className="mt-2 text-xs text-amber-200">Generation did not complete. The saved response may be partial.</p>}</article>)}
+        {(messagesQuery.data || []).map((message) => <article key={message.id} className={`max-w-3xl rounded-xl border p-4 ${message.role === 'user' ? 'ml-auto border-sky-400/20 bg-sky-400/[0.06]' : 'border-white/[0.08] bg-black/15'}`}><div className="flex items-center gap-2 text-xs font-semibold capitalize text-zinc-300"><Bot size={14} className={message.role === 'assistant' ? 'text-violet-300' : 'text-sky-300'} /> {message.role === 'assistant' ? 'Evidence-grounded response' : 'You'}</div><p className="mt-2 whitespace-pre-wrap text-sm leading-6 text-zinc-200">{message.content}</p>{message.role === 'assistant' && <ScatteringMapFigure api={api} citations={message.citations} onOpenPreview={onOpenPreview} />}{message.role === 'assistant' && <CitationCards citations={message.citations} onOpenPatch={onOpenPatch} onOpenPreview={onOpenPreview} onOpenScene={onOpenScene} />}{message.status === 'failed' && <p className="mt-2 text-xs text-amber-200">Generation did not complete. The saved response may be partial.</p>}</article>)}
         {streamStatus && <p className="text-xs text-sky-300">{streamStatus}</p>}
-        {(streamText || streamCitations.length > 0) && <article className="max-w-3xl rounded-xl border border-violet-400/20 bg-violet-400/[0.05] p-4"><div className="flex items-center gap-2 text-xs font-semibold text-violet-200"><Bot size={14} /> Generating grounded response</div>{streamText && <p className="mt-2 whitespace-pre-wrap text-sm leading-6 text-zinc-100">{streamText}</p>}<CitationCards citations={streamCitations} onOpenPatch={onOpenPatch} onOpenPreview={onOpenPreview} onOpenScene={onOpenScene} /></article>}
+        {(streamText || streamCitations.length > 0) && <article className="max-w-3xl rounded-xl border border-violet-400/20 bg-violet-400/[0.05] p-4"><div className="flex items-center gap-2 text-xs font-semibold text-violet-200"><Bot size={14} /> Generating grounded response</div>{streamText && <p className="mt-2 whitespace-pre-wrap text-sm leading-6 text-zinc-100">{streamText}</p>}<ScatteringMapFigure api={api} citations={streamCitations} onOpenPreview={onOpenPreview} /><CitationCards citations={streamCitations} onOpenPatch={onOpenPatch} onOpenPreview={onOpenPreview} onOpenScene={onOpenScene} /></article>}
         {error && <div className="rounded-lg border border-red-500/25 bg-red-500/[0.08] p-3 text-xs text-red-100"><div className="flex gap-2"><AlertTriangle size={15} className="shrink-0" />{error.message}</div></div>}
       </div>
       <form onSubmit={send} className="border-t border-white/[0.07] p-4"><div className="grid gap-3 sm:grid-cols-[minmax(0,1fr)_auto]"><textarea value={draft} onChange={(event) => setDraft(event.target.value)} maxLength={1000} rows={3} placeholder="Ask about the authorized SAR evidence…" className="min-h-[5.5rem] w-full resize-y rounded-lg border border-white/[0.1] bg-black/20 px-3 py-2.5 text-sm text-white outline-none placeholder:text-zinc-600 focus:border-sky-400/55 focus:ring-2 focus:ring-sky-400/10" /><button type="submit" disabled={!draft.trim() || Boolean(controllerRef.current)} className="inline-flex items-center justify-center gap-2 self-end rounded-lg bg-sky-500 px-4 py-2.5 text-sm font-semibold text-white transition hover:bg-sky-400 disabled:cursor-not-allowed disabled:opacity-45"><Send size={15} /> Ask</button></div><div className="mt-3 flex flex-col gap-2 text-xs text-zinc-500 sm:flex-row sm:items-center sm:justify-between"><label className="flex items-center gap-2">Scope for a new conversation<select value={activeConversation?.scene_id || scopeSceneId} disabled={Boolean(activeConversation)} onChange={(event) => setScopeSceneId(event.target.value)} className="rounded-md border border-white/[0.1] bg-black/20 px-2 py-1 text-xs text-zinc-300 disabled:opacity-55"><option value="">Entire project</option>{readyScenes.map((scene) => <option key={scene.id} value={scene.id}>{scene.name}</option>)}</select></label><span>{activeConversation ? (activeConversation.scene_id ? 'This conversation is locked to its selected scene.' : 'This conversation searches the full project.') : 'Choose a scene to create a scene-scoped conversation.'}</span></div></form>

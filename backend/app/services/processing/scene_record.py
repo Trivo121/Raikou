@@ -30,6 +30,7 @@ logger = logging.getLogger(__name__)
 # 3000 windows of 120 px covers a full IW GRD densely enough that the fitted
 # split moves in the third decimal, and it keeps the pass inside a minute.
 SCATTERING_MAX_WINDOWS = 3000
+SCATTERING_MAP_FILENAME = "scattering_map.png"
 
 SCENE_RECORD_FILENAME = "scene_record.json"
 DETECTOR_RESULTS_FILENAME = "detector_results.json"
@@ -62,7 +63,13 @@ def build_scene_record(
         scene = _scene_details(dataset, session_id, scene_metadata)
         land_water = _estimate_land_water_context(dataset)
         land_cover = _estimate_land_cover(dataset, scene_metadata, calibration)
-        scattering = _estimate_scattering(dataset, calibration, noise)
+        scattering = _estimate_scattering(
+            dataset,
+            calibration,
+            noise,
+            session_dir=session_dir,
+            scene_name=str(scene.get("name") or "") or None,
+        )
         raw_detections, detector, validation_errors = _read_detector_results(
             detector_results_path,
             width=dataset.width,
@@ -286,6 +293,9 @@ def _estimate_scattering(
     dataset: rasterio.io.DatasetReader,
     calibration: dict[str, Any] | None,
     noise: dict[str, Any] | None,
+    *,
+    session_dir: str | None = None,
+    scene_name: str | None = None,
 ) -> dict[str, Any] | None:
     """Describe the scene by scattering mechanism, which travels between regions.
 
@@ -340,10 +350,92 @@ def _estimate_scattering(
 
         if not windows:
             return None
-        return build_scattering_block(windows, fit_thresholds(windows), is_denoised=True)
+        thresholds = fit_thresholds(windows)
+        block = build_scattering_block(windows, thresholds, is_denoised=True)
+        if block is None:
+            return None
+
+        # The picture is rendered from the *same* fitted thresholds, so the map
+        # and the percentages in chat are two views of one measurement rather
+        # than two analyses that could disagree in front of a reader.  It is
+        # attempted separately and never allowed to cost us the block.
+        try:
+            block["map"] = _render_scattering_map(
+                dataset, cal, noi, thresholds, session_dir=session_dir, scene_name=scene_name
+            )
+            _adopt_map_fractions(block)
+        except Exception:
+            logger.warning("Scattering map render failed; keeping the text block", exc_info=True)
+        return block
     except Exception:
         logger.warning("Scattering description failed; continuing without it", exc_info=True)
         return None
+
+
+def _adopt_map_fractions(block: dict[str, Any]) -> None:
+    """Make the sentence quote the same shares the picture is drawn from.
+
+    The block's fractions start out from the sampled windows -- a few thousand
+    120 px squares on a grid.  The map is a dense pass over the whole raster at
+    98% coverage, so it is the better estimate of the same quantity, and once it
+    exists there is no reason to keep two.  Leaving both put "63% volume" in the
+    text beside a legend reading "59% volume", which reads as the product
+    contradicting itself rather than as two sampling schemes.
+    """
+    payload = block.get("map")
+    if not isinstance(payload, dict):
+        return
+    fractions = payload.get("map_fractions")
+    if not isinstance(fractions, dict) or not fractions:
+        return
+    mechanisms = block.get("mechanisms")
+    if not isinstance(mechanisms, list):
+        return
+    for item in mechanisms:
+        if isinstance(item, dict) and item.get("mechanism") in fractions:
+            item["fraction"] = round(float(fractions[item["mechanism"]]), 4)
+    # Drop any mechanism the dense pass found nothing of; the sparse sample can
+    # catch a handful of windows the full raster does not support.
+    block["mechanisms"] = [
+        item
+        for item in mechanisms
+        if isinstance(item, dict) and float(item.get("fraction") or 0.0) > 0.0
+    ]
+    block["fraction_source"] = "dense_map"
+
+
+def _render_scattering_map(
+    dataset: rasterio.io.DatasetReader,
+    calibration: dict[str, Any],
+    noise: dict[str, Any],
+    thresholds: Any,
+    *,
+    session_dir: str | None,
+    scene_name: str | None,
+) -> dict[str, Any] | None:
+    """Classify the full raster onto a block-mean grid and write the PNG."""
+    from app.services.processing.scattering_map import (
+        compute_mechanism_map,
+        map_payload,
+        render_mechanism_png,
+    )
+
+    mechanism_map = compute_mechanism_map(dataset, calibration, noise, thresholds)
+    if mechanism_map is None:
+        return None
+    payload = map_payload(mechanism_map)
+    # The window sample and the block grid cover the scene differently, so their
+    # shares differ slightly. Carrying both stops that reading as a contradiction.
+    payload["map_fractions"] = {
+        name: round(share, 4) for name, share in mechanism_map.fractions().items()
+    }
+    if session_dir:
+        png = render_mechanism_png(mechanism_map, scene_name=scene_name)
+        path = Path(session_dir) / SCATTERING_MAP_FILENAME
+        path.write_bytes(png)
+        payload["file"] = SCATTERING_MAP_FILENAME
+        payload["size_bytes"] = len(png)
+    return payload
 
 
 def _scene_centroid(

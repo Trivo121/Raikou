@@ -48,7 +48,11 @@ router = APIRouter()
 logger = logging.getLogger(__name__)
 
 _ACTIVE_PROCESS_STATUSES = {"queued", "validating", "processing", "running"}
-_PREVIEWABLE_KINDS = {"overview", "thumbnail", "patch_preview"}
+# "evidence" covers both the detector sidecar and the rendered scattering map.
+# Membership here is not sufficient on its own: create_artifact_preview also
+# requires an image/* content type, which is what keeps the JSON sidecar out
+# without needing a separate artifact_kind and the enum migration that implies.
+_PREVIEWABLE_KINDS = {"overview", "thumbnail", "patch_preview", "evidence"}
 _MAX_EVIDENCE_ITEMS = 100
 _MAX_LIMITATIONS = 24
 

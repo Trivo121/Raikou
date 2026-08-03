@@ -502,6 +502,7 @@ class M3Pipeline:
                 "generated_at": datetime.now(timezone.utc).isoformat(),
                 "verified_object_source": False,
             }
+        scattering_map_artifact_id = self._persist_scattering_map(task, record, workdir)
         record_path = workdir / "scene_record.json"
         record_path.write_text(json.dumps(record, sort_keys=True, indent=2), encoding="utf-8")
         record_artifact = self._persist_file(task, kind="scene_record", logical_key="derived:scene-record:v1", path=record_path,
@@ -516,7 +517,38 @@ class M3Pipeline:
             model_version=(record.get("detector") or {}).get("model_version"),
         )
         return {"scene_record_artifact_id": str(record_artifact["id"]), "detector_sidecar_present": detector_path is not None,
-                "detector_sidecar_artifact_id": detector_artifact_id}
+                "detector_sidecar_artifact_id": detector_artifact_id,
+                "scattering_map_artifact_id": scattering_map_artifact_id}
+
+    def _persist_scattering_map(self, task: dict[str, Any], record: dict[str, Any], workdir: Path) -> str | None:
+        """Store the mechanism map and record its artifact id on the block itself.
+
+        Chat resolves the image from the scene record rather than by re-querying
+        artifacts, so the id has to land inside the block before the record is
+        serialised.  Non-fatal like everything else in this stage: a scene with
+        no picture still gets its text.
+        """
+        # The block lives under record["context"], beside land_water and
+        # land_cover -- not at the top level.
+        context = record.get("context") if isinstance(record.get("context"), dict) else {}
+        scattering = context.get("scattering") if isinstance(context.get("scattering"), dict) else None
+        descriptor = scattering.get("map") if isinstance(scattering, dict) and isinstance(scattering.get("map"), dict) else None
+        if not descriptor or not descriptor.get("file"):
+            return None
+        path = workdir / str(descriptor["file"])
+        if not path.exists():
+            return None
+        try:
+            artifact = self._persist_file(
+                task, kind="evidence", logical_key="derived:scattering-map:v1", path=path,
+                content_type="image/png",
+                metadata={"is_land_use_classification": False, "geometry": "radar"},
+            )
+        except Exception:
+            logger.warning("Could not persist the scattering map; keeping the text block", exc_info=True)
+            return None
+        descriptor["artifact_id"] = str(artifact["id"])
+        return str(artifact["id"])
 
     def _detector_sidecar(self, task: dict[str, Any], artifacts: list[dict[str, Any]], workdir: Path) -> Path | None:
         sidecar = next((item for item in artifacts if item["kind"] == "metadata"), None)
