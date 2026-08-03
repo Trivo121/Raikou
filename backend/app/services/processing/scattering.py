@@ -115,6 +115,61 @@ class ScatteringThresholds:
         }
 
 
+def _otsu(values: np.ndarray, bins: int = 256) -> float:
+    """The between-class variance maximising split of a one-dimensional sample."""
+    histogram, edges = np.histogram(values, bins=bins)
+    weights = histogram.astype(np.float64)
+    total = weights.sum()
+    if total <= 0:
+        return float(np.median(values))
+    probability = weights / total
+    centres = (edges[:-1] + edges[1:]) / 2.0
+    omega = np.cumsum(probability)
+    mu = np.cumsum(probability * centres)
+    with np.errstate(divide="ignore", invalid="ignore"):
+        between = (mu[-1] * omega - mu) ** 2 / (omega * (1.0 - omega))
+    if not np.any(np.isfinite(between)):
+        return float(np.median(values))
+    return float(centres[int(np.nanargmax(between))])
+
+
+# A double-bounce return is far brighter than any distributed target; this stays
+# an absolute physical level rather than a percentile, because a scene with no
+# built-up area must be allowed to report none rather than have its brightest
+# 2% relabelled as buildings.
+DOUBLE_BOUNCE_MIN_VV_DB = -6.0
+DOUBLE_BOUNCE_MAX_RATIO_DB = -8.0
+VOLUME_MIN_RVI = 0.55
+
+
+def fit_thresholds(windows: list[WindowScattering]) -> ScatteringThresholds:
+    """Fit the surface/volume split to this scene rather than assume it.
+
+    The cross-pol ratio is bimodal once thermal noise is removed -- surface
+    scattering barely depolarises while a canopy depolarises strongly -- so an
+    Otsu split of the ratio finds the boundary between the two populations from
+    the data.  On the validation scene it landed at -12.22 dB, separating a
+    population at RVI 0.07 from one at RVI 0.70.
+
+    The alternative, C-band textbook levels, was measured assigning 0.1% of a
+    coastal scene to water against an independent estimate of 36%: a
+    monsoon-season sea is rough and never darkens to the calm-water backscatter
+    those levels assume.
+    """
+    ratios = np.array([w.cross_pol_ratio_db for w in windows], dtype=np.float64)
+    vv = np.array([w.vv_db for w in windows], dtype=np.float64)
+    return ScatteringThresholds(
+        # Surface scattering is the darker population; the ratio does the
+        # separating and this only stops a bright depolarising window being
+        # pulled in by ratio alone.
+        water_max_vv_db=float(np.percentile(vv, 60)),
+        water_max_ratio_db=_otsu(ratios),
+        urban_min_vv_db=DOUBLE_BOUNCE_MIN_VV_DB,
+        urban_max_ratio_db=DOUBLE_BOUNCE_MAX_RATIO_DB,
+        volume_min_rvi=VOLUME_MIN_RVI,
+    )
+
+
 MECHANISMS = ("smooth_surface", "double_bounce", "volume", "rough_surface")
 
 MECHANISM_DESCRIPTIONS = {

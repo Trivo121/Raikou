@@ -26,6 +26,11 @@ from app.services.processing.patch_pipeline import PATCH_SIZE, preprocess_patch
 
 logger = logging.getLogger(__name__)
 
+# Scattering shares are a scene-level distribution, so sampling is sufficient.
+# 3000 windows of 120 px covers a full IW GRD densely enough that the fitted
+# split moves in the third decimal, and it keeps the pass inside a minute.
+SCATTERING_MAX_WINDOWS = 3000
+
 SCENE_RECORD_FILENAME = "scene_record.json"
 DETECTOR_RESULTS_FILENAME = "detector_results.json"
 SCHEMA_VERSION = "1.0"
@@ -40,6 +45,7 @@ def build_scene_record(
     scene_metadata: dict[str, Any],
     detector_results_path: str | None = None,
     calibration: dict[str, Any] | None = None,
+    noise: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Build and atomically persist the canonical scene record.
 
@@ -56,6 +62,7 @@ def build_scene_record(
         scene = _scene_details(dataset, session_id, scene_metadata)
         land_water = _estimate_land_water_context(dataset)
         land_cover = _estimate_land_cover(dataset, scene_metadata, calibration)
+        scattering = _estimate_scattering(dataset, calibration, noise)
         raw_detections, detector, validation_errors = _read_detector_results(
             detector_results_path,
             width=dataset.width,
@@ -86,7 +93,11 @@ def build_scene_record(
         "session_id": session_id,
         "generated_at": datetime.now(timezone.utc).isoformat(),
         "scene": scene,
-        "context": {"land_water": land_water, "land_cover": land_cover},
+        "context": {
+            "land_water": land_water,
+            "land_cover": land_cover,
+            "scattering": scattering,
+        },
         "detector": detector,
         "objects": objects,
         "supporting_crops": crops,
@@ -269,6 +280,70 @@ def _estimate_land_cover(
             None, domain=domain, unavailable_reason="land-cover estimation failed"
         )
     return land_cover_module.build_land_cover_block(result, domain=domain)
+
+
+def _estimate_scattering(
+    dataset: rasterio.io.DatasetReader,
+    calibration: dict[str, Any] | None,
+    noise: dict[str, Any] | None,
+) -> dict[str, Any] | None:
+    """Describe the scene by scattering mechanism, which travels between regions.
+
+    Needs both polarisations, the sigmaNought LUTs and the noise LUTs.  The last
+    is not optional: VH runs about 7 dB below VV and therefore lands on the
+    receiver noise floor over exactly the smooth surfaces the cross-pol ratio is
+    used to identify, and a ratio built on that floor is wrong where it matters
+    most.  Thresholds are fitted to this scene's own distribution rather than
+    taken from C-band convention, which was measured putting 0.1% of a coastal
+    scene in the water class because a monsoon sea never reaches the calm-water
+    backscatter the convention assumes.
+
+    Returns ``None`` for anything it cannot do, because scene context must never
+    stop a scene reaching ready.
+    """
+    if dataset.count < 2 or not calibration or not noise:
+        return None
+    try:
+        from app.services.ingestion.calibration import NoiseLUT, SigmaNoughtLUT, dn_to_sigma0_db
+        from app.services.models.land_cover import _grid_origins
+        from app.services.processing.scattering import (
+            build_scattering_block,
+            fit_thresholds,
+            summarize_window,
+        )
+
+        def _as(kind, value):
+            return value if isinstance(value, kind) else kind.from_dict(value)
+
+        cal = {pol: _as(SigmaNoughtLUT, value) for pol, value in calibration.items()}
+        noi = {pol: _as(NoiseLUT, value) for pol, value in noise.items()}
+        if not {"VV", "VH"} <= set(cal) or not {"VV", "VH"} <= set(noi):
+            return None
+
+        windows = []
+        for row_off, col_off in _grid_origins(dataset.width, dataset.height, SCATTERING_MAX_WINDOWS):
+            raw = dataset.read(indexes=[1, 2], window=Window(col_off, row_off, 120, 120))
+            if raw.shape[1:] != (120, 120):
+                continue
+            if np.count_nonzero(raw == 0) / raw.size > 0.40:
+                continue
+            bands = []
+            for index, polarisation in enumerate(("VV", "VH")):
+                bands.append(
+                    dn_to_sigma0_db(
+                        raw[index],
+                        cal[polarisation].window(row_off, col_off, 120, 120),
+                        noise=noi[polarisation].window(row_off, col_off, 120, 120),
+                    )
+                )
+            windows.append(summarize_window(bands[0], bands[1]))
+
+        if not windows:
+            return None
+        return build_scattering_block(windows, fit_thresholds(windows), is_denoised=True)
+    except Exception:
+        logger.warning("Scattering description failed; continuing without it", exc_info=True)
+        return None
 
 
 def _scene_centroid(

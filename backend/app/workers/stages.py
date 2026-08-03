@@ -29,7 +29,7 @@ from rasterio.enums import Resampling
 
 from app.core.config import settings
 from app.services.cache.evidence import invalidate_project_evidence_cache_sync
-from app.services.ingestion.calibration import load_calibration_luts
+from app.services.ingestion.calibration import load_calibration_luts, load_noise_luts
 from app.services.ingestion.file_ingestion import _build_vrt, _build_vrt_local, extract_metadata
 from app.services.models.sarclip_encoder import EncodedPatch, ProgressUpdate, SARCLIPEncoder, encode_patch_stream
 from app.services.processing.patch_pipeline import PATCH_SIZE, _build_channels, extract_and_preprocess_patches
@@ -447,13 +447,14 @@ class M3Pipeline:
                                            model_name=settings.SARCLIP_MODEL_NAME, model_version=settings.SARCLIP_MODEL_VERSION)
         return {"indexed_vectors": indexed, "embedding_manifest_artifact_id": str(manifest["id"])}
 
-    def _calibration_luts(self, task: dict[str, Any], artifacts: list[dict[str, Any]]) -> dict[str, Any]:
-        """Parse sigmaNought LUTs from the source archive `_prepare_vrt` just downloaded.
+    def _annotation_luts(
+        self, task: dict[str, Any], artifacts: list[dict[str, Any]]
+    ) -> tuple[dict[str, Any], dict[str, Any]]:
+        """Parse the sigmaNought and thermal-noise LUTs from the source archive.
 
-        The LUTs are read here rather than carried in the scene metadata because
-        one IW GRD pair serialises to roughly 342 KB, which has no business in a
-        jsonb column that is re-read on every scene load.  A scene with no
-        archive, or a generic zipped GeoTIFF, simply has no calibration.
+        Both live in ``annotation/calibration/`` and are read in one pass so a
+        scene cannot end up calibrated but not denoised, which would leave the
+        cross-pol ratio wrong over water while every other number looked right.
         """
         source_dir = self._workdir(task) / "sources"
         for artifact in artifacts:
@@ -464,11 +465,11 @@ class M3Pipeline:
                 continue
             try:
                 with zipfile.ZipFile(path, "r") as handle:
-                    return load_calibration_luts(handle)
+                    return load_calibration_luts(handle), load_noise_luts(handle)
             except (OSError, ValueError, zipfile.BadZipFile) as exc:
-                logger.warning("Could not read calibration from %s: %s", path.name, exc)
-                return {}
-        return {}
+                logger.warning("Could not read annotations from %s: %s", path.name, exc)
+                return {}, {}
+        return {}, {}
 
     def _build_evidence(self, task: dict[str, Any]) -> dict[str, Any]:
         vrt_path, metadata, artifacts = self._prepare_vrt(task)
@@ -485,10 +486,11 @@ class M3Pipeline:
                 metadata={"validated_schema": "detector-sidecar-v1"},
             )
             detector_artifact_id = str(detector_artifact["id"])
+        calibration, noise = self._annotation_luts(task, artifacts)
         try:
             record = build_scene_record(session_id=str(task["scene_id"]), session_dir=str(workdir), vrt_path=str(vrt_path),
                                         scene_metadata=metadata, detector_results_path=str(detector_path) if detector_path else None,
-                                        calibration=self._calibration_luts(task, artifacts))
+                                        calibration=calibration, noise=noise)
         except (OSError, ValueError, rasterio.errors.RasterioError) as exc:
             raise UserFacingTaskError("EVIDENCE_BUILD_FAILED", "The detector-backed evidence record could not be created.") from exc
         caption = self._caption_overview(task)

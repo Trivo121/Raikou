@@ -835,6 +835,7 @@ async def _load_rag_context(
                 "geography": _scene_geography(scene, record),
                 "land_water": record_context.get("land_water") if isinstance(record_context.get("land_water"), dict) else None,
                 "land_cover": record_context.get("land_cover") if isinstance(record_context.get("land_cover"), dict) else None,
+                "scattering": record_context.get("scattering") if isinstance(record_context.get("scattering"), dict) else None,
                 "detector": _safe_detector_metadata(record_detector or fallback_detector),
                 "validated_detector_facts": detector_facts,
                 "detector_spatial_groups": _detector_spatial_groups(detector_facts, record),
@@ -970,6 +971,17 @@ def _bounded_context_text(context: dict[str, Any]) -> str:
                     separators=(",", ":"),
                 )
             )
+        scattering = scene.get("scattering")
+        if isinstance(scattering, dict) and scattering.get("mechanisms"):
+            # Unlike land cover this carries no training domain, so it is safe
+            # to put in front of the model for any scene on Earth.
+            lines.append(
+                "SCENE SCATTERING (measured mechanism, not land use, not detector evidence): "
+                + json.dumps(
+                    {"mechanisms": scattering.get("mechanisms"), "is_denoised": scattering.get("is_denoised")},
+                    separators=(",", ":"),
+                )
+            )
         detector = scene.get("detector")
         if isinstance(detector, dict) and detector:
             lines.append("DETECTOR PROVENANCE: " + json.dumps(detector, separators=(",", ":")))
@@ -1066,6 +1078,7 @@ def _scene_first_answer(
             query,
             scene.get("land_water") if isinstance(scene.get("land_water"), dict) else None,
             scene.get("land_cover") if isinstance(scene.get("land_cover"), dict) else None,
+            scene.get("scattering") if isinstance(scene.get("scattering"), dict) else None,
         )
     return None
 
@@ -1278,6 +1291,27 @@ def _describe_land_water(land_water: dict[str, Any]) -> str | None:
     return f"{sentence}{qualifier}. This is a brightness threshold, not a coastline map."
 
 
+def _describe_scattering(scattering: dict[str, Any]) -> str | None:
+    """How the surface scatters, which is measurement rather than classification."""
+    mechanisms = [
+        item
+        for item in (scattering.get("mechanisms") or [])
+        if isinstance(item, dict) and isinstance(item.get("description"), str)
+    ]
+    if not mechanisms:
+        return None
+    ordered = sorted(mechanisms, key=lambda item: -float(item.get("fraction") or 0.0))
+    named = "; ".join(
+        "{:.0%} {}".format(float(item.get("fraction") or 0.0), item["description"])
+        for item in ordered
+    )
+    return (
+        f"By scattering mechanism, measured from calibrated VV/VH intensity: {named}. "
+        "This is set by surface geometry rather than by region, so it applies anywhere, "
+        "but it describes a mechanism and not a land use."
+    )
+
+
 def _describe_land_cover(land_cover: dict[str, Any]) -> str | None:
     """Land cover, or a plain reason it is being withheld."""
     status = str(land_cover.get("status") or "")
@@ -1389,11 +1423,19 @@ def _compose_scene_description(*, context: dict[str, Any], scene_id: UUID, obser
             "position. That is an absence of evidence, not evidence of absence."
         )
 
+    scattering = scene.get("scattering")
+    described = _describe_scattering(scattering) if isinstance(scattering, dict) else None
+    if described:
+        paragraphs.append(described)
+
     land_cover = scene.get("land_cover")
     if isinstance(land_cover, dict) and land_cover:
-        described = _describe_land_cover(land_cover)
-        if described:
-            paragraphs.append(described)
+        # Only mention the withheld classifier when nothing better was said.
+        # After a scattering paragraph, a second "land cover is withheld"
+        # sentence reads as though the scene were described twice and failed.
+        cover_text = _describe_land_cover(land_cover)
+        if cover_text and not (described and land_cover.get("status") != "available"):
+            paragraphs.append(cover_text)
 
     closing: list[str] = []
     described = _describe_observations(observations)

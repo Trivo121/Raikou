@@ -269,9 +269,52 @@ def test_environment_answer_withholds_out_of_domain_classes() -> None:
     # The class names must not leak into an answer for a scene the model cannot
     # describe, and the fallback must still be the honest heuristic.
     assert "Marine waters" not in answer
-    assert "cannot confirm vegetation" in answer
+    assert "cannot name land-cover classes" in answer
     assert "outside the training footprint" in answer
     assert "water-dominant" in answer
+
+
+def test_environment_answer_falls_back_to_scattering_out_of_domain() -> None:
+    # The point of the scattering block: a scene outside Europe previously got a
+    # refusal, because the only classifier available had no correct label for it.
+    # Scattering mechanism is a measurement with no training domain, so it can
+    # answer where land cover cannot.
+    block = build_land_cover_block(_result(), domain=assess_domain(79.7, 13.8))
+    scattering = {
+        "is_denoised": True,
+        "mechanisms": [
+            {"mechanism": "volume", "fraction": 0.627, "description": "vegetation canopy depolarising the return"},
+            {"mechanism": "smooth_surface", "fraction": 0.265, "description": "open water, wet flats or dry sand"},
+        ],
+    }
+
+    answer = environment_answer(
+        "Is there any vegetation?", {"label": "likely_water_dominant"}, block, scattering
+    )
+
+    assert "63% vegetation canopy" in answer
+    assert "26% open water" in answer
+    assert "thermal-noise removal" in answer
+    # It answers, but it must never be mistaken for a land-use label...
+    assert "not a land use" in answer
+    # ...and the European classes still must not leak.
+    assert "Marine waters" not in answer
+
+
+def test_scattering_does_not_override_usable_land_cover() -> None:
+    # In domain, the classifier says more than a mechanism does and must win.
+    block = build_land_cover_block(_result(), domain=assess_domain(14.4, 46.1))
+    scattering = {
+        "is_denoised": True,
+        "mechanisms": [
+            {"mechanism": "volume", "fraction": 0.9, "description": "vegetation canopy depolarising the return"}
+        ],
+    }
+
+    answer = environment_answer("Is there any water?", {"label": "mixed_or_indeterminate"}, block, scattering)
+
+    assert "Marine waters" in answer
+    assert "vegetation canopy" not in answer
 
 
 def test_environment_answer_still_works_without_land_cover() -> None:

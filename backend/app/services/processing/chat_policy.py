@@ -193,15 +193,24 @@ def environment_answer(
     query: str,
     land_water: dict[str, Any] | None,
     land_cover: dict[str, Any] | None = None,
+    scattering: dict[str, Any] | None = None,
 ) -> str:
-    """Answer an environment question, preferring land cover over the heuristic.
+    """Answer an environment question from the best basis the scene actually has.
 
-    A calibrated land-cover estimate is a strictly better basis for this
-    question than the backscatter heuristic, so it wins when it is usable.  It
-    is only usable when the scene sits inside the classifier's training domain:
-    a block marked ``out_of_domain`` is not a weaker signal to be hedged, it is
-    a European label space applied where no correct answer exists, so it is
-    reported as unusable and the heuristic answers instead.
+    Three bases in descending order of what they can say:
+
+    ``land_cover`` names CORINE classes, but only inside the classifier's
+    training domain.  A block marked ``out_of_domain`` is not a weaker signal to
+    hedge; it is a European label space applied where no correct answer exists.
+
+    ``scattering`` names the mechanism -- surface, volume, double-bounce -- from
+    calibrated dual-pol intensity.  It cannot name a land use, but it is a
+    measurement rather than a classification and it carries no training domain,
+    so it answers where land cover cannot.  That makes it the right fallback for
+    the common case of a scene outside Europe, which previously got a refusal.
+
+    ``land_water`` is a brightness threshold and answers only when neither of
+    the above is available.
     """
     normalized_query = query.casefold()
     requested = next((term for term in _ENVIRONMENT_TERMS if term in normalized_query), "that environment class")
@@ -211,27 +220,60 @@ def environment_answer(
     if cover.get("status") == "available" and classes:
         return _land_cover_answer(requested, cover, classes)
 
+    mechanisms = _scattering_sentence(scattering)
     heuristic = _land_water_sentence(land_water)
+    basis = mechanisms or heuristic
     domain = cover.get("domain") or {}
     if cover.get("status") == "out_of_domain":
         return (
-            f"I cannot confirm {requested} from the current evidence. This scene lies outside the "
-            f"training footprint of Raikou's only land-cover model ({domain.get('training_region', 'its training region')}, "
-            f"{domain.get('label_space', 'a regional label space')}), so its classes do not describe this location and "
-            f"are withheld rather than reported. {heuristic} It is only a backscatter heuristic, "
-            "not land-cover classification."
+            f"I cannot name land-cover classes for this scene: it lies outside the training footprint of "
+            f"Raikou's only land-cover model ({domain.get('training_region', 'its training region')}, "
+            f"{domain.get('label_space', 'a regional label space')}), so those classes do not describe this "
+            f"location and are withheld. {basis}"
         )
     if cover.get("status") == "domain_unverified":
         return (
-            f"I cannot confirm {requested} from the current evidence. Raikou's land-cover model is only "
-            f"valid inside {domain.get('training_region', 'its training region')}, and this scene carries no "
-            "georeference to check that against, so its classes are withheld rather than reported as if they "
-            f"applied. {heuristic} It is only a backscatter heuristic, not land-cover classification."
+            f"I cannot name land-cover classes for this scene: Raikou's land-cover model is only valid inside "
+            f"{domain.get('training_region', 'its training region')}, and this scene carries no georeference to "
+            f"check that against, so those classes are withheld. {basis}"
+        )
+    if mechanisms:
+        return (
+            f"Raikou has no land-cover classifier that applies to this scene, so I cannot name a class for "
+            f"{requested}. {mechanisms}"
         )
     return (
         f"I cannot confirm {requested} from the current evidence. Raikou has no calibrated {requested} "
         "segmentation or validated detector for this scene, and a SARCLIP patch cannot establish it. "
         f"{heuristic} It is only a backscatter heuristic, not land-cover classification."
+    )
+
+
+def _scattering_sentence(scattering: dict[str, Any] | None) -> str:
+    """Report the scattering mechanism split, with what it cannot say attached."""
+    block = scattering if isinstance(scattering, dict) else {}
+    mechanisms = [
+        item
+        for item in (block.get("mechanisms") or [])
+        if isinstance(item, dict) and isinstance(item.get("mechanism"), str)
+    ]
+    if not mechanisms:
+        return ""
+    ordered = sorted(mechanisms, key=lambda item: -float(item.get("fraction") or 0.0))
+    named = "; ".join(
+        "{:.0%} {}".format(float(item.get("fraction") or 0.0), item.get("description") or item["mechanism"])
+        for item in ordered
+    )
+    denoised = (
+        "calibrated VV/VH intensity after thermal-noise removal"
+        if block.get("is_denoised")
+        else "calibrated VV/VH intensity"
+    )
+    return (
+        f"What I can measure is how the surface scatters, from {denoised}: {named}. "
+        "That is set by surface geometry rather than by region, so it holds here, but it describes a "
+        "mechanism and not a land use -- a canopy scatters this way whether it is plantation, mangrove "
+        "or tall crop, and those cannot be separated from radar intensity alone."
     )
 
 
