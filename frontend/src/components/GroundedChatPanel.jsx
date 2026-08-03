@@ -24,14 +24,22 @@ function findScatteringMap(citations) {
 function ScatteringMapFigure({ api, citations, onOpenPreview }) {
   const citation = useMemo(() => findScatteringMap(citations), [citations]);
   const artifactId = citation?.artifact_id || null;
+  // Bumped when a rendered grant expires, to force a fresh <img> load rather
+  // than let the browser re-serve the failed response from cache.
+  const [grantAttempt, setGrantAttempt] = useState(0);
   const previewQuery = useQuery({
-    queryKey: ['scattering-map-preview', artifactId],
+    queryKey: ['scattering-map-preview', artifactId, grantAttempt],
     enabled: Boolean(api && artifactId),
     queryFn: ({ signal }) => api.artifacts.preview(artifactId, { signal }),
-    // The grant is short-lived and signed; refetch well before it expires
-    // rather than render a broken image.
-    staleTime: 60_000,
-    retry: 1,
+    // The stored PNG is permanent; only the signed grant is short-lived, and
+    // ARTIFACT_PREVIEW_TTL_SECONDS is 90. Holding a cached grant for longer
+    // than that hands the <img> a URL that is already dead, which is how a
+    // permanent artifact ends up looking like a broken image in old messages.
+    staleTime: 45_000,
+    gcTime: 45_000,
+    refetchOnMount: 'always',
+    refetchOnWindowFocus: true,
+    retry: 2,
   });
 
   if (!artifactId) return null;
@@ -63,7 +71,17 @@ function ScatteringMapFigure({ api, citations, onOpenPreview }) {
           className="block w-full cursor-zoom-in"
           title="Open full size"
         >
-          <img src={url} alt="Scattering mechanism map of the scene" className="block w-full bg-[#121214]" loading="lazy" />
+          <img
+            key={`${artifactId}-${grantAttempt}`}
+            src={url}
+            alt="Scattering mechanism map of the scene"
+            className="block w-full bg-[#121214]"
+            loading="lazy"
+            // A grant that expired between issue and load leaves a broken image
+            // over a file that is perfectly intact. Mint a new one instead, once
+            // -- a second failure is a real error, not an expiry.
+            onError={() => setGrantAttempt((attempt) => (attempt < 2 ? attempt + 1 : attempt))}
+          />
         </button>
       )}
       <figcaption className="border-t border-white/[0.07] px-3 py-2 text-[11px] leading-5 text-zinc-500">
