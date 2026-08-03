@@ -41,10 +41,58 @@ SIGMA0_FLOOR_DB = -50.0
 
 _CALIBRATION_DIR = "/annotation/calibration/"
 _CALIBRATION_PREFIX = "calibration-"
+_NOISE_PREFIX = "noise-"
 
 
 class CalibrationError(ValueError):
     """The archive did not contain a usable sigmaNought calibration LUT."""
+
+
+def _bilinear_window(
+    lines: np.ndarray,
+    pixels: np.ndarray,
+    grid: np.ndarray,
+    row_off: int,
+    col_off: int,
+    height: int,
+    width: int,
+) -> np.ndarray:
+    """Bilinearly resample a sparse (lines x pixels) node grid over one pixel window.
+
+    Shared by the sigmaNought and noise LUTs, which are distributed on the same
+    kind of coarse rectilinear grid and must be resampled the same way -- a noise
+    grid interpolated differently from the calibration grid it is subtracted
+    against would leave a residual that tracks the node spacing.
+    """
+    if height <= 0 or width <= 0:
+        raise CalibrationError("interpolation window must have positive extent")
+
+    target_rows = np.arange(row_off, row_off + height, dtype=np.float64)
+    target_cols = np.arange(col_off, col_off + width, dtype=np.float64)
+
+    # Only the azimuth nodes bracketing this window are needed; a 224-row patch
+    # touches two of the 27 lines rather than all of them.
+    first = max(int(np.searchsorted(lines, target_rows[0], side="right")) - 1, 0)
+    last = min(int(np.searchsorted(lines, target_rows[-1], side="left")) + 1, lines.size - 1)
+    sub_lines = lines[first : last + 1]
+    sub_grid = grid[first : last + 1]
+
+    # Interpolate along range first: (n_lines, width).
+    along_range = np.empty((sub_lines.size, width), dtype=np.float64)
+    for index in range(sub_lines.size):
+        along_range[index] = np.interp(target_cols, pixels, sub_grid[index])
+
+    if sub_lines.size == 1:
+        return np.repeat(along_range, height, axis=0)
+
+    # Then along azimuth, vectorised over the target rows.
+    upper = np.clip(
+        np.searchsorted(sub_lines, target_rows, side="right") - 1, 0, sub_lines.size - 2
+    )
+    low = sub_lines[upper].astype(np.float64)
+    high = sub_lines[upper + 1].astype(np.float64)
+    weight = ((target_rows - low) / (high - low))[:, None]
+    return along_range[upper] * (1.0 - weight) + along_range[upper + 1] * weight
 
 
 @dataclass(frozen=True)
@@ -84,40 +132,9 @@ class SigmaNoughtLUT:
         extrapolate; the LUT normally covers slightly more than the raster, so
         this only affects the final rows of a scene.
         """
-        if height <= 0 or width <= 0:
-            raise CalibrationError("calibration window must have positive extent")
-
-        target_rows = np.arange(row_off, row_off + height, dtype=np.float64)
-        target_cols = np.arange(col_off, col_off + width, dtype=np.float64)
-
-        # Only the azimuth nodes bracketing this window are needed; a 224-row
-        # patch touches two of the 27 lines rather than all of them.
-        first = max(int(np.searchsorted(self.lines, target_rows[0], side="right")) - 1, 0)
-        last = min(
-            int(np.searchsorted(self.lines, target_rows[-1], side="left")) + 1,
-            self.lines.size - 1,
+        return _bilinear_window(
+            self.lines, self.pixels, self.sigma_nought, row_off, col_off, height, width
         )
-        sub_lines = self.lines[first : last + 1]
-        sub_grid = self.sigma_nought[first : last + 1]
-
-        # Interpolate along range first: (n_lines, width).
-        along_range = np.empty((sub_lines.size, width), dtype=np.float64)
-        for index in range(sub_lines.size):
-            along_range[index] = np.interp(target_cols, self.pixels, sub_grid[index])
-
-        if sub_lines.size == 1:
-            return np.repeat(along_range, height, axis=0)
-
-        # Then along azimuth, vectorised over the target rows.
-        upper = np.clip(
-            np.searchsorted(sub_lines, target_rows, side="right") - 1,
-            0,
-            sub_lines.size - 2,
-        )
-        low = sub_lines[upper].astype(np.float64)
-        high = sub_lines[upper + 1].astype(np.float64)
-        weight = ((target_rows - low) / (high - low))[:, None]
-        return along_range[upper] * (1.0 - weight) + along_range[upper + 1] * weight
 
     def to_dict(self) -> dict[str, Any]:
         """Serialise to a JSON-safe sidecar so later stages need not re-open the archive."""
@@ -142,10 +159,77 @@ class SigmaNoughtLUT:
         )
 
 
+@dataclass(frozen=True)
+class _AzimuthNoiseBlock:
+    """One sub-swath's azimuth noise correction.
+
+    An IW GRD is assembled from three sub-swaths, each with its own receive
+    timing, so the azimuth correction is defined per range-sample block rather
+    than across the whole raster.
+    """
+
+    swath: str
+    first_range_sample: int
+    last_range_sample: int
+    lines: np.ndarray
+    values: np.ndarray
+
+
+@dataclass(frozen=True)
+class NoiseLUT:
+    """A parsed thermal-noise LUT for one polarisation, in DN squared.
+
+    ESA distributes the noise estimate as two terms: a range LUT on a coarse
+    (line, pixel) grid, and a per-sub-swath azimuth LUT that scales it.  The
+    product is the expected thermal-noise power at that pixel, in the same DN
+    squared units as the measurement, so it subtracts before calibration.
+    """
+
+    polarisation: str
+    lines: np.ndarray
+    pixels: np.ndarray
+    range_lut: np.ndarray
+    azimuth_blocks: tuple[_AzimuthNoiseBlock, ...] = ()
+    source_file: str | None = None
+
+    def __post_init__(self) -> None:
+        if self.range_lut.shape != (self.lines.size, self.pixels.size):
+            raise CalibrationError(
+                f"noise grid {self.range_lut.shape} does not match "
+                f"({self.lines.size}, {self.pixels.size}) noise nodes"
+            )
+        if self.lines.size == 0 or self.pixels.size == 0:
+            raise CalibrationError("noise LUT is empty")
+        if np.any(self.range_lut < 0):
+            raise CalibrationError("noise power cannot be negative")
+
+    def window(self, row_off: int, col_off: int, height: int, width: int) -> np.ndarray:
+        """Interpolate the noise estimate over one pixel window, in DN squared."""
+        noise = _bilinear_window(
+            self.lines, self.pixels, self.range_lut, row_off, col_off, height, width
+        )
+        if not self.azimuth_blocks:
+            return noise
+
+        target_rows = np.arange(row_off, row_off + height, dtype=np.float64)
+        columns = np.arange(col_off, col_off + width)
+        scale = np.ones((height, width), dtype=np.float64)
+        for block in self.azimuth_blocks:
+            selected = (columns >= block.first_range_sample) & (columns <= block.last_range_sample)
+            if not selected.any():
+                continue
+            # np.interp clamps outside the node range, which is what we want at
+            # the first and last azimuth line rather than an extrapolated value.
+            factor = np.interp(target_rows, block.lines, block.values)
+            scale[:, selected] = factor[:, None]
+        return noise * scale
+
+
 def dn_to_sigma0_db(
     digital_numbers: np.ndarray,
     calibration: np.ndarray,
     floor_db: float = SIGMA0_FLOOR_DB,
+    noise: np.ndarray | None = None,
 ) -> np.ndarray:
     """Convert DN to sigma nought in decibels using an interpolated LUT window.
 
@@ -153,10 +237,26 @@ def dn_to_sigma0_db(
     of zero mark no-data in a GRD product and would otherwise produce ``-inf``;
     they clamp to ``floor_db`` so the result stays finite for percentile and
     histogram work upstream.
+
+    Passing ``noise`` subtracts the thermal-noise power before calibration,
+    which matters for the cross-polarised channel and essentially nowhere else:
+    VH runs about 7 dB below VV, so over water it lands on the noise floor.  On
+    this instrument the VH NESZ sits near -27 dB while the darkest quarter of a
+    real scene measures -25 dB or below, meaning those pixels are reporting the
+    receiver rather than the surface.  Left in, that floor masquerades as a
+    genuine low-backscatter population and any VH/VV ratio built on it is wrong
+    exactly where it is most needed.
+
+    Subtraction can drive a pixel to zero or below where the signal never rose
+    above the noise.  Those clamp to ``floor_db``; they carry no measurement and
+    callers that care should count them rather than average over them.
     """
     dn = np.asarray(digital_numbers, dtype=np.float64)
     lut = np.asarray(calibration, dtype=np.float64)
-    sigma0 = np.square(dn) / np.square(lut)
+    power = np.square(dn)
+    if noise is not None:
+        power = power - np.asarray(noise, dtype=np.float64)
+    sigma0 = power / np.square(lut)
     floor_linear = 10.0 ** (floor_db / 10.0)
     return 10.0 * np.log10(np.maximum(sigma0, floor_linear))
 
@@ -246,6 +346,108 @@ def calibration_members(names: Iterable[str]) -> list[str]:
         and name.rsplit("/", 1)[-1].startswith(_CALIBRATION_PREFIX)
         and name.lower().endswith(".xml")
     )
+
+
+def noise_members(names: Iterable[str]) -> list[str]:
+    """Select the thermal-noise annotations, excluding the sibling calibration LUTs."""
+    return sorted(
+        name
+        for name in names
+        if _CALIBRATION_DIR in name
+        and name.rsplit("/", 1)[-1].startswith(_NOISE_PREFIX)
+        and name.lower().endswith(".xml")
+    )
+
+
+def parse_noise_xml(source: BinaryIO, source_file: str | None = None) -> NoiseLUT:
+    """Parse one ``noise-*.xml`` into a :class:`NoiseLUT`."""
+    try:
+        root = ET.parse(source).getroot()
+    except ET.ParseError as exc:
+        raise CalibrationError(f"noise XML is malformed: {exc}") from exc
+
+    polarisation = _find_text(root, "polarisation") or "UNKNOWN"
+
+    vectors = root.findall(".//noiseRangeVector")
+    if not vectors:
+        raise CalibrationError("noise XML contains no noiseRangeVector entries")
+
+    lines: list[int] = []
+    pixel_nodes: np.ndarray | None = None
+    rows: list[np.ndarray] = []
+    for vector in vectors:
+        line_element = vector.find("line")
+        pixel_element = vector.find("pixel")
+        lut_element = vector.find("noiseRangeLut")
+        if line_element is None or pixel_element is None or lut_element is None:
+            raise CalibrationError("noiseRangeVector is missing line, pixel or noiseRangeLut")
+
+        pixels = np.fromstring(pixel_element.text or "", dtype=np.int64, sep=" ")
+        values = np.fromstring(lut_element.text or "", dtype=np.float64, sep=" ")
+        if pixels.size == 0 or pixels.size != values.size:
+            raise CalibrationError("noiseRangeVector pixel and noiseRangeLut lengths disagree")
+        if pixel_nodes is None:
+            pixel_nodes = pixels
+        elif not np.array_equal(pixel_nodes, pixels):
+            raise CalibrationError("noise vectors do not share a common range grid")
+
+        lines.append(int(line_element.text or 0))
+        rows.append(values)
+
+    assert pixel_nodes is not None  # guaranteed by the loop above
+    order = np.argsort(np.asarray(lines, dtype=np.int64))
+
+    blocks: list[_AzimuthNoiseBlock] = []
+    for vector in root.findall(".//noiseAzimuthVector"):
+        line_element = vector.find("line")
+        lut_element = vector.find("noiseAzimuthLut")
+        first = vector.find("firstRangeSample")
+        last = vector.find("lastRangeSample")
+        if line_element is None or lut_element is None or first is None or last is None:
+            continue
+        block_lines = np.fromstring(line_element.text or "", dtype=np.float64, sep=" ")
+        block_values = np.fromstring(lut_element.text or "", dtype=np.float64, sep=" ")
+        if block_lines.size == 0 or block_lines.size != block_values.size:
+            continue
+        blocks.append(
+            _AzimuthNoiseBlock(
+                swath=(vector.findtext("swath") or "").strip(),
+                first_range_sample=int(first.text or 0),
+                last_range_sample=int(last.text or 0),
+                lines=block_lines,
+                values=block_values,
+            )
+        )
+
+    return NoiseLUT(
+        polarisation=polarisation.upper(),
+        lines=np.asarray(lines, dtype=np.int64)[order],
+        pixels=pixel_nodes,
+        range_lut=np.vstack(rows)[order],
+        azimuth_blocks=tuple(blocks),
+        source_file=source_file,
+    )
+
+
+def load_noise_luts(archive: zipfile.ZipFile) -> dict[str, NoiseLUT]:
+    """Read every thermal-noise LUT in a SAFE archive, keyed by polarisation.
+
+    Returns an empty mapping when the archive carries no noise annotations, so
+    denoising stays optional in exactly the way calibration is.
+    """
+    luts: dict[str, NoiseLUT] = {}
+    for name in noise_members(archive.namelist()):
+        try:
+            with archive.open(name) as handle:
+                lut = parse_noise_xml(handle, source_file=name)
+        except (CalibrationError, KeyError, OSError) as exc:
+            logger.warning("Skipping unusable noise annotation %s: %s", name, exc)
+            continue
+        if lut.polarisation in luts:
+            logger.warning("Duplicate noise LUT for %s; keeping the first", lut.polarisation)
+            continue
+        luts[lut.polarisation] = lut
+    return luts
 
 
 def _find_text(root: ET.Element, tag: str) -> str | None:
