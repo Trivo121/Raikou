@@ -94,9 +94,31 @@ function ScatteringMapFigure({ api, citations, onOpenPreview }) {
   );
 }
 
+// Citations are collapsed rather than removed. Eight cards restating "authorized
+// evidence source" after every answer buried the answer, and the mechanism map
+// was the worst casualty -- the one citation worth seeing is rendered as a
+// figure above, so the rest is provenance a reader consults rather than reads.
+// Deleting them outright would take the audit trail with it, which is the one
+// thing an evidence-grounded product cannot give up.
 function CitationCards({ citations, onOpenPatch, onOpenPreview, onOpenScene }) {
   if (!Array.isArray(citations) || citations.length === 0) return null;
-  return <div className="mt-3 grid gap-2 sm:grid-cols-2">{citations.slice(0, 8).map((citation, index) => {
+  const shown = citations.filter((citation) => citation?.source_type !== 'scattering_map');
+  if (shown.length === 0) return null;
+  return (
+    <details className="group mt-3">
+      <summary className="inline-flex cursor-pointer list-none items-center gap-1.5 rounded-md border border-white/[0.08] bg-black/15 px-2.5 py-1.5 text-[11px] font-semibold text-zinc-400 transition hover:border-sky-400/35 hover:text-zinc-200">
+        <ShieldCheck size={12} className="text-sky-300" />
+        {shown.length} evidence {shown.length === 1 ? 'source' : 'sources'}
+        <span className="font-normal text-zinc-600 group-open:hidden">· show</span>
+        <span className="hidden font-normal text-zinc-600 group-open:inline">· hide</span>
+      </summary>
+      <CitationGrid citations={shown} onOpenPatch={onOpenPatch} onOpenPreview={onOpenPreview} onOpenScene={onOpenScene} />
+    </details>
+  );
+}
+
+function CitationGrid({ citations, onOpenPatch, onOpenPreview, onOpenScene }) {
+  return <div className="mt-2 grid gap-2 sm:grid-cols-2">{citations.slice(0, 8).map((citation, index) => {
     const canOpenPatch = citation.patch_id;
     const canOpenArtifact = citation.artifact_id;
     const onClick = canOpenPatch
