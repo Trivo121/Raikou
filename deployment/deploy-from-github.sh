@@ -87,7 +87,13 @@ if not dsn:
 files = [
     "20260722000000_m3_enqueue_task_variable_fix.sql",
     "20260722001000_m3_processing_job_attempt_bound.sql",
-    "20260722002000_m5_grounded_chat_message_modes.sql",
+    # 20260722002000_m5_grounded_chat_message_modes.sql is deliberately absent.
+    # It is not re-runnable: it re-adds messages_mode_check with the mode set
+    # that predates scene_record_*, and 20260723000000 below drops and recreates
+    # the same constraint with a strict superset of those modes. Once the app has
+    # written one scene_record_* message, replaying the narrow version fails with
+    # "violated by some row" and aborts the deploy with the API already stopped.
+    # 20260723000000 applies the full set, so nothing is lost by skipping it.
     "20260722003000_m4_rebuild_ready_scene.sql",
     "20260723000000_m5_scene_record_message_modes.sql",
     # M7 must stay in this order and in two files: PostgreSQL will not let the
