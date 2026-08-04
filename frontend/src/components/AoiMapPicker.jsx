@@ -82,9 +82,10 @@ export default function AoiMapPicker({ value, onChange, footprints, selectedId, 
   const [armed, setArmed] = useState(false);
 
   useEffect(() => {
-    if (mapRef.current || !containerRef.current) return undefined;
+    const container = containerRef.current;
+    if (mapRef.current || !container) return undefined;
     const map = new MapLibreMap({
-      container: containerRef.current,
+      container,
       style: BASEMAP_STYLE,
       center: [80.5, 13.5],
       zoom: 4,
@@ -204,7 +205,19 @@ export default function AoiMapPicker({ value, onChange, footprints, selectedId, 
     map.on('mouseup', handleUp);
     globalThis.addEventListener('mouseup', handleWindowUp);
 
+    // maplibre measures the container once, at construction, and never
+    // re-measures on its own. This panel mounts inside a lazy Suspense
+    // boundary, so the container is routinely still being laid out at that
+    // moment: the canvas then keeps whatever width it saw first. Observed
+    // live at 400px inside a 724px box, and a container that is momentarily
+    // zero-width yields a zero-width canvas -- a blank map, no error anywhere.
+    // ResizeObserver fires once on observe, so this covers the initial size
+    // as well as later layout changes.
+    const resizeObserver = new ResizeObserver(() => { map.resize(); });
+    resizeObserver.observe(container);
+
     return () => {
+      resizeObserver.disconnect();
       globalThis.removeEventListener('mouseup', handleWindowUp);
       map.remove();
       mapRef.current = null;
