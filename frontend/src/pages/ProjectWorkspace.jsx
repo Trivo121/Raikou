@@ -293,7 +293,9 @@ export default function ProjectWorkspace() {
             userId={user?.id}
             projectId={projectId}
             sourceMode={location.source}
+            copernicusEnabled={copernicusEnabled}
             onUseUpload={() => location.update({ source: null })}
+            onUseCopernicus={() => location.update({ source: 'copernicus' })}
             onUploadStateChange={refreshWorkspace}
           />
         )}
@@ -399,7 +401,7 @@ function SceneCounts({ counts }) {
   );
 }
 
-function ScenesPanel({ api, counts, scenes, selectedSceneId, selectedScene, isSceneLoading, sceneError, events, onSelectScene, onOpenPreview, onOpenPatch, onAddScene, onCancelJob, onRetry, onAskAboutScene, actionPending, actionError, userId, projectId, sourceMode, onUseUpload, onUploadStateChange }) {
+function ScenesPanel({ api, counts, scenes, selectedSceneId, selectedScene, isSceneLoading, sceneError, events, onSelectScene, onOpenPreview, onOpenPatch, onAddScene, onCancelJob, onRetry, onAskAboutScene, actionPending, actionError, userId, projectId, sourceMode, copernicusEnabled, onUseUpload, onUseCopernicus, onUploadStateChange }) {
   return (
     <section className="grid gap-5 xl:grid-cols-[minmax(17rem,0.8fr)_minmax(0,1.7fr)]">
       <aside className="overflow-hidden rounded-xl border border-white/[0.08] bg-[#111114] xl:sticky xl:top-24 xl:max-h-[calc(100vh-8rem)] xl:overflow-y-auto">
@@ -407,7 +409,7 @@ function ScenesPanel({ api, counts, scenes, selectedSceneId, selectedScene, isSc
         <div className="border-b border-white/[0.07]"><SceneCounts counts={counts} /></div>
         {scenes.length === 0 ? <div className="p-7 text-center"><FileImage className="mx-auto text-zinc-600" size={23} /><p className="mt-3 text-sm font-medium text-zinc-300">No scenes yet</p><button type="button" onClick={onAddScene} className="mt-3 text-xs font-semibold text-sky-300 hover:text-sky-200">Add your first scene</button></div> : <ul className="divide-y divide-white/[0.06]">{scenes.map((item) => <li key={item.scene.id}><button type="button" onClick={() => onSelectScene(item.scene.id)} className={`w-full px-4 py-3.5 text-left transition ${selectedSceneId === item.scene.id ? 'bg-sky-400/[0.08] shadow-[inset_2px_0_0_#38bdf8]' : 'hover:bg-white/[0.03]'}`}><div className="flex items-start justify-between gap-3"><p className="min-w-0 truncate text-sm font-medium text-zinc-200">{item.scene.name}</p><StatusPill status={item.scene.status} /></div><p className="mt-1.5 truncate text-xs text-zinc-600">{item.active_job ? `${readable(item.active_job.stage)} · ${item.active_job.progress}%` : (item.evidence_status === 'ready' ? 'Evidence ready' : 'Awaiting processing')}</p></button></li>)}</ul>}
       </aside>
-      <div className="min-w-0">{isSceneLoading && <WorkspaceMessage title="Loading scene details" detail="Loading this scene..." icon={LoaderCircle} />}{sceneError && <WorkspaceMessage title="Scene unavailable" detail={sceneError.message} icon={AlertTriangle} />}{!isSceneLoading && !sceneError && !selectedScene && <WorkspaceMessage title="Select a scene" detail="Pick a scene to see its imagery, progress and evidence." icon={Layers3} />}{selectedScene && <SceneDetailPanel api={api} onAskAboutScene={onAskAboutScene} sceneDetail={selectedScene} events={events} onOpenPreview={onOpenPreview} onOpenPatch={onOpenPatch} onCancelJob={onCancelJob} onRetry={onRetry} actionPending={actionPending} actionError={actionError} userId={userId} projectId={projectId} sourceMode={sourceMode} onUseUpload={onUseUpload} onUploadStateChange={onUploadStateChange} />}</div>
+      <div className="min-w-0">{isSceneLoading && <WorkspaceMessage title="Loading scene details" detail="Loading this scene..." icon={LoaderCircle} />}{sceneError && <WorkspaceMessage title="Scene unavailable" detail={sceneError.message} icon={AlertTriangle} />}{!isSceneLoading && !sceneError && !selectedScene && <WorkspaceMessage title="Select a scene" detail="Pick a scene to see its imagery, progress and evidence." icon={Layers3} />}{selectedScene && <SceneDetailPanel api={api} onAskAboutScene={onAskAboutScene} sceneDetail={selectedScene} events={events} onOpenPreview={onOpenPreview} onOpenPatch={onOpenPatch} onCancelJob={onCancelJob} onRetry={onRetry} actionPending={actionPending} actionError={actionError} userId={userId} projectId={projectId} sourceMode={sourceMode} copernicusEnabled={copernicusEnabled} onUseUpload={onUseUpload} onUseCopernicus={onUseCopernicus} onUploadStateChange={onUploadStateChange} />}</div>
     </section>
   );
 }
@@ -456,7 +458,7 @@ function SceneOverviewImage({ api, artifact, onOpenPreview }) {
   );
 }
 
-function SceneDetailPanel({ api, sceneDetail, events, onOpenPreview, onOpenPatch, onCancelJob, onRetry, onAskAboutScene, actionPending, actionError, userId, projectId, sourceMode, onUseUpload, onUploadStateChange }) {
+function SceneDetailPanel({ api, sceneDetail, events, onOpenPreview, onOpenPatch, onCancelJob, onRetry, onAskAboutScene, actionPending, actionError, userId, projectId, sourceMode, copernicusEnabled, onUseUpload, onUseCopernicus, onUploadStateChange }) {
   const { scene, active_job: activeJob, latest_job: latestJob } = sceneDetail;
   const job = activeJob || latestJob;
   const retryable = ['failed', 'cancelled'].includes(String(scene.status));
@@ -498,14 +500,32 @@ function SceneDetailPanel({ api, sceneDetail, events, onOpenPreview, onOpenPatch
       {/* Getting a source in is the whole task when a scene has no raster yet,
           and noise once it does. Exactly one of these two panels is mounted:
           they share no storage, and the Copernicus one needs none because its
-          idempotency key is durable in scene_acquisitions. */}
+          idempotency key is durable in scene_acquisitions.
+          Both directions have to be reachable from here. The choice is made in
+          the add-scene dialog and then lives in the URL, so a scene created
+          before that dialog existed -- or any scene after a reload, which drops
+          the query parameter -- would otherwise be stuck on upload forever with
+          no way back to the map. */}
       {needsSource && (sourceMode === 'copernicus'
         ? (
           <Suspense fallback={<section className="rounded-xl border border-white/[0.08] bg-[#111114] p-5"><p className="flex items-center gap-2 text-xs text-zinc-500"><LoaderCircle size={14} className="animate-spin" /> Loading the Copernicus browser...</p></section>}>
             <CopernicusSearchPanel api={api} scene={scene} onStarted={onUploadStateChange} onUseUpload={onUseUpload} />
           </Suspense>
         )
-        : <SceneUploadPanel projectId={projectId} scene={scene} userId={userId} onComplete={onUploadStateChange} onTerminal={onUploadStateChange} />)}
+        : (
+          <div className="space-y-2">
+            <SceneUploadPanel projectId={projectId} scene={scene} userId={userId} onComplete={onUploadStateChange} onTerminal={onUploadStateChange} />
+            {copernicusEnabled && (
+              <button
+                type="button"
+                onClick={onUseCopernicus}
+                className="inline-flex items-center gap-1.5 rounded-lg px-1 py-1 text-xs font-semibold text-sky-300 transition hover:text-sky-200"
+              >
+                <Satellite size={13} /> Fetch from Copernicus instead
+              </button>
+            )}
+          </div>
+        ))}
 
       {/* Everything a user consults rather than reads. Sizes, pixel bounds and a
           worker event log diagnose a bad run; they do not help use a good one. */}
