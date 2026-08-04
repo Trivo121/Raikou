@@ -210,6 +210,45 @@ class Settings(BaseSettings):
     # versioned keys then bypass stale retrieval/context cache entries.
     M5_QDRANT_INDEX_VERSION: str = "v1"
 
+    # M7 Copernicus (CDSE) direct fetch. This is an optional second scene
+    # source: when it is unconfigured the feature reports itself unavailable
+    # and every existing upload path is untouched. Deliberately absent from
+    # ``startup_issues()`` -- production must still boot without credentials.
+    COPERNICUS_ENABLED: bool = True
+    COPERNICUS_CLIENT_ID: str | None = None
+    COPERNICUS_CLIENT_SECRET: str | None = None
+    COPERNICUS_TOKEN_URL: str = (
+        "https://identity.dataspace.copernicus.eu/auth/realms/CDSE/protocol/openid-connect/token"
+    )
+    COPERNICUS_CATALOGUE_URL: str = "https://catalogue.dataspace.copernicus.eu/odata/v1"
+    COPERNICUS_DOWNLOAD_URL: str = "https://download.dataspace.copernicus.eu/odata/v1"
+    # A bearer token is only ever re-attached to a redirect whose host equals
+    # one of these or is a subdomain of it. Never widen this to a substring
+    # match: 'dataspace.copernicus.eu.attacker.com' must not pass.
+    COPERNICUS_ALLOWED_REDIRECT_HOSTS: Annotated[list[str], NoDecode] = Field(
+        default_factory=lambda: ["dataspace.copernicus.eu"]
+    )
+    COPERNICUS_TOKEN_REFRESH_MARGIN_SECONDS: int = Field(default=60, ge=5, le=600)
+    COPERNICUS_SEARCH_TIMEOUT_SECONDS: float = Field(default=40.0, gt=0, le=300)
+    COPERNICUS_CONNECT_TIMEOUT_SECONDS: float = Field(default=15.0, gt=0, le=120)
+    # A slow-but-alive 1 MB/s stream and a dead socket must not look the same.
+    # This bounds one read, not the whole download.
+    COPERNICUS_READ_TIMEOUT_SECONDS: float = Field(default=120.0, gt=0, le=1800)
+    COPERNICUS_MAX_REDIRECTS: int = Field(default=5, ge=0, le=20)
+    # In-attempt HTTP Range resumes. Worker scratch is wiped between attempts,
+    # so this cannot span them; the task retry budget covers that.
+    COPERNICUS_DOWNLOAD_MAX_RESUMES: int = Field(default=5, ge=0, le=50)
+    COPERNICUS_MAX_SEARCH_RESULTS: int = Field(default=50, ge=1, le=200)
+    COPERNICUS_MAX_SEARCH_DAYS: int = Field(default=90, ge=1, le=3660)
+    COPERNICUS_MAX_AOI_SQ_KM: float = Field(default=250_000.0, gt=0, le=10_000_000)
+    # M3_TASK_LEASE_SECONDS is 300 with no heartbeat of its own. A 1 GB product
+    # throttled to 1 MB/s takes ~1000s and would be stolen mid-download.
+    COPERNICUS_LEASE_HEARTBEAT_SECONDS: int = Field(default=60, ge=10, le=280)
+    # Progress rows are written from the heartbeat thread. Bound them so a
+    # throttled multi-hour download cannot flood processing_job_events.
+    COPERNICUS_MAX_PROGRESS_EVENTS: int = Field(default=20, ge=0, le=200)
+    ACQUISITION_RATE_LIMIT_PER_MINUTE: int = Field(default=20, ge=1, le=1_000)
+
     # Model / worker compatibility settings retained from the existing pipeline.
     VLLM_BASE_URL: str = "http://localhost:8001/v1"
     SARCHAT_MODEL_ID: str = "/models/SARChat-InternVL2.5-2B"
@@ -252,7 +291,7 @@ class Settings(BaseSettings):
             raise ValueError("API_V1_STR must start with '/'.")
         return value.rstrip("/") or "/"
 
-    @field_validator("CORS_ORIGINS", mode="before")
+    @field_validator("CORS_ORIGINS", "COPERNICUS_ALLOWED_REDIRECT_HOSTS", mode="before")
     @classmethod
     def parse_cors_origins(cls, value: object) -> object:
         """Accept a JSON list or a simple comma-separated environment value."""
@@ -327,6 +366,51 @@ class Settings(BaseSettings):
             value = value.strip()
             return value or None
         return value
+
+    @field_validator(
+        "COPERNICUS_CLIENT_ID",
+        "COPERNICUS_CLIENT_SECRET",
+        mode="before",
+    )
+    @classmethod
+    def normalize_optional_copernicus_values(cls, value: object) -> object:
+        """Treat blank Copernicus credentials as intentionally unconfigured."""
+        if isinstance(value, str):
+            value = value.strip()
+            return value or None
+        return value
+
+    @field_validator("COPERNICUS_ALLOWED_REDIRECT_HOSTS")
+    @classmethod
+    def validate_copernicus_redirect_hosts(cls, value: list[str]) -> list[str]:
+        """Keep the allowlist to bare, comparable hostnames.
+
+        The download redirect check compares an exact host or a dotted suffix.
+        A value carrying a scheme, port, or path would silently never match
+        and quietly strip the bearer token from every legitimate redirect.
+        """
+        normalized: list[str] = []
+        for entry in value:
+            host = str(entry).strip().lower().rstrip(".")
+            if not host or not re.fullmatch(r"[a-z0-9](?:[a-z0-9.-]*[a-z0-9])?", host):
+                raise ValueError(
+                    "COPERNICUS_ALLOWED_REDIRECT_HOSTS entries must be bare hostnames "
+                    "without a scheme, port, or path."
+                )
+            normalized.append(host)
+        # A blank environment value parses to an empty list, which would strip
+        # the bearer token from every download redirect and fail all fetches
+        # with a confusing 401. Fall back to the default rather than refusing
+        # to boot the whole API over an optional feature's setting.
+        return normalized or ["dataspace.copernicus.eu"]
+
+    @field_validator("COPERNICUS_TOKEN_URL", "COPERNICUS_CATALOGUE_URL", "COPERNICUS_DOWNLOAD_URL")
+    @classmethod
+    def validate_copernicus_endpoints(cls, value: str) -> str:
+        parsed = urlparse(value)
+        if parsed.scheme not in {"http", "https"} or not parsed.hostname:
+            raise ValueError("Copernicus endpoints must be http:// or https:// URLs with a host.")
+        return value.rstrip("/")
 
     @field_validator("STORAGE_FORCE_PATH_STYLE", mode="before")
     @classmethod
@@ -459,6 +543,30 @@ class Settings(BaseSettings):
         # client expects the project root URL.
         url = self.SUPABASE_URL.rstrip("/").replace("/rest/v1", "")
         return url, self.SUPABASE_SERVICE_KEY
+
+    @property
+    def copernicus_configured(self) -> bool:
+        """Whether the optional CDSE fetch path can reach the provider.
+
+        Deliberately not part of ``startup_issues()``: an absent optional
+        credential must degrade this one feature, never refuse to boot the API.
+        """
+        return bool(
+            self.COPERNICUS_ENABLED
+            and self.COPERNICUS_CLIENT_ID
+            and self.COPERNICUS_CLIENT_SECRET
+        )
+
+    def require_copernicus(self) -> tuple[str, str]:
+        """Return the configured CDSE OAuth client credentials or fail clearly."""
+        if not self.COPERNICUS_ENABLED:
+            raise RuntimeError("Copernicus acquisition is disabled. Set COPERNICUS_ENABLED=true.")
+        if not self.COPERNICUS_CLIENT_ID or not self.COPERNICUS_CLIENT_SECRET:
+            raise RuntimeError(
+                "Copernicus is not configured. Create an OAuth client in the CDSE dashboard "
+                "and set COPERNICUS_CLIENT_ID and COPERNICUS_CLIENT_SECRET."
+            )
+        return self.COPERNICUS_CLIENT_ID, self.COPERNICUS_CLIENT_SECRET
 
     def require_worker_database_url(self) -> str:
         if not self.SUPABASE_DB_URL:

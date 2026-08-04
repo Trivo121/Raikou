@@ -14,6 +14,10 @@ torchvision>=0.15.0
 open_clip_torch>=2.24.0
 Pillow>=10.0.0
 openai>=1.0.0
+# Already present transitively as an openai v1 SDK dependency and already
+# imported by mounted routes. Pinned explicitly because M7 depends on its
+# streaming, per-read timeout, and redirect-control behaviour directly.
+httpx>=0.27,<1
 supabase
 psycopg[binary]>=3.2.0
 pytest>=8.0.0

@@ -12,7 +12,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, PlainTextResponse
 from starlette.concurrency import run_in_threadpool
 
-from app.api.routes import evidence, jobs, projects, scenes, uploads, workspace
+from app.api.routes import acquisitions, evidence, jobs, projects, scenes, uploads, workspace
 from app.core.config import settings
 from app.core.middleware import ReleaseHardeningMiddleware, ResponseHeadersMiddleware
 from app.core.observability import configure_logging, metrics
@@ -79,6 +79,9 @@ app.include_router(projects.router, prefix=f"{settings.API_V1_STR}/projects", ta
 app.include_router(scenes.router, prefix=f"{settings.API_V1_STR}/scenes", tags=["scenes"])
 app.include_router(uploads.router, prefix=f"{settings.API_V1_STR}/uploads", tags=["uploads"])
 app.include_router(jobs.router, prefix=f"{settings.API_V1_STR}/jobs", tags=["jobs"])
+app.include_router(
+    acquisitions.router, prefix=f"{settings.API_V1_STR}/acquisitions", tags=["acquisitions"]
+)
 app.include_router(workspace.router, prefix=settings.API_V1_STR, tags=["workspace"])
 app.include_router(evidence.router, prefix=settings.API_V1_STR, tags=["evidence"])
 

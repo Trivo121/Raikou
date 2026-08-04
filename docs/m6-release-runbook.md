@@ -24,6 +24,22 @@ database or object storage credentials in the browser.
 1. Back up the existing `.env`, gateway config, and application release.
 2. Apply Supabase migrations in lexical order from `supabase/migrations/`.
    Verify `supabase_migrations.schema_migrations` contains every version.
+
+   **Migrations must land before the API and workers restart.** This ordering
+   is load-bearing for M7: `20260724000000` adds the `fetch_source` job stage
+   and `20260724001000` adds `scene_acquisitions` in a separate file, because
+   PostgreSQL requires a commit before a new enum value can be used. Deploying
+   the application first is safe but degraded — `GET /acquisitions/providers`
+   reports `schema_not_applied`, the UI hides the Copernicus option, and every
+   existing upload path is unaffected. Confirm with:
+
+   ```sql
+   select public.m7_acquisition_schema_ready();
+   ```
+
+   Note that `/readyz` deliberately does **not** gate on this probe; see
+   `docs/m7-copernicus-acquisition.md` for why an optional feature degrades
+   rather than failing the whole app closed.
 3. Fetch model artefacts to the GPU host and verify their SHA-256 checksums.
    SARVLM is the retrieval encoder; SARChat is the generation model.
 4. Build the frontend with a same-origin API base, then bring up Compose:

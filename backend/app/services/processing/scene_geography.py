@@ -47,6 +47,23 @@ def _haversine_km(a: tuple[float, float], b: tuple[float, float]) -> float:
     return 2 * _EARTH_RADIUS_KM * math.asin(min(1.0, math.sqrt(h)))
 
 
+def bbox_extent_km(
+    west: float, south: float, east: float, north: float
+) -> tuple[float, float]:
+    """Return the (width, height) of a search rectangle in kilometres.
+
+    Reuses the haversine above so the server's AOI area limit and the figure
+    the map shows a user are derived the same way and cannot disagree. Width is
+    measured across the middle latitude: at the top of a tall box the parallel
+    is shorter, and using a corner would over- or under-state the area by that
+    ratio.
+    """
+    middle_latitude = (south + north) / 2.0
+    width = _haversine_km((middle_latitude, west), (middle_latitude, east))
+    height = _haversine_km((south, west), (north, west))
+    return width, height
+
+
 def parse_footprint(bounding_box: Any) -> Footprint | None:
     """Read the manifest footprint, which lists space-separated 'lat,lon' corners.
 

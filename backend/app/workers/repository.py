@@ -208,7 +208,14 @@ class WorkerRepository:
                 self._fail_task_locked(cursor, task, "RETRY_EXHAUSTED", "Worker retry budget exhausted.")
                 return None
 
-            next_job_status = "validating" if task["stage"] == "validate_upload" else "processing"
+            # m3_validate_job_transition rejects queued -> processing for
+            # anything except kind='cleanup_scene'. A job whose first stage is
+            # fetch_source would otherwise raise inside this transaction, abort
+            # the whole claim, and wedge at queued while the worker error-loops
+            # with nothing in the UI to explain it.
+            next_job_status = (
+                "validating" if task["stage"] in {"fetch_source", "validate_upload"} else "processing"
+            )
             cursor.execute(
                 """
                 update public.processing_job_tasks
@@ -251,6 +258,10 @@ class WorkerRepository:
             )
             task["attempt"] = attempt
             task["job_status"] = next_job_status
+            # The row was selected before the lease was written, so locked_by
+            # still held the previous holder. A stage that renews its own lease
+            # needs the current one.
+            task["locked_by"] = worker_id
             return task
 
     def task_cancel_requested(self, task: dict[str, Any]) -> bool:
@@ -292,7 +303,9 @@ class WorkerRepository:
                     "select public.m3_enqueue_task(%s, %s::public.processing_job_stage, %s::public.processing_execution_class, '{}'::jsonb, %s)",
                     (current["processing_job_id"], stage, execution_class, settings.M3_TASK_MAX_ATTEMPTS),
                 )
-                next_status = "processing" if stage != "validate_upload" else "validating"
+                next_status = (
+                    "validating" if stage in {"fetch_source", "validate_upload"} else "processing"
+                )
                 cursor.execute(
                     """
                     update public.processing_jobs
@@ -422,6 +435,138 @@ class WorkerRepository:
             if row is None:
                 raise UserFacingTaskError("SCENE_NOT_FOUND", "Scene no longer exists.")
             return row
+
+    def scene_acquisition(self, task: dict[str, Any]) -> dict[str, Any] | None:
+        """Load the acquisition this job was created for.
+
+        Resolved through the job rather than the task payload so a replayed or
+        hand-repaired task row cannot point at another tenant's acquisition.
+        """
+        with self.transaction() as connection, connection.cursor() as cursor:
+            cursor.execute(
+                """
+                select a.*
+                from public.scene_acquisitions a
+                join public.processing_jobs j on j.scene_acquisition_id = a.id
+                where j.id = %s and a.owner_id = %s and a.scene_id = %s and a.project_id = %s
+                """,
+                (task["processing_job_id"], task["owner_id"], task["scene_id"], task["project_id"]),
+            )
+            return self._one(cursor)
+
+    def renew_task_lease(self, task: dict[str, Any], worker_id: str) -> bool:
+        """Extend this worker's lease; False means another worker took it.
+
+        M3_TASK_LEASE_SECONDS is 300 and nothing else heartbeats, so a long
+        download would be stolen mid-flight and its work discarded. Returning
+        False is the signal to abort immediately rather than finish work
+        ``complete_task`` will refuse.
+        """
+        with self.transaction() as connection, connection.cursor() as cursor:
+            cursor.execute(
+                """
+                update public.processing_job_tasks
+                set locked_at = now()
+                where id = %s and locked_by = %s
+                  and status = 'leased'::public.processing_task_status
+                """,
+                (task["id"], worker_id),
+            )
+            return cursor.rowcount == 1
+
+    def record_progress_event(
+        self, task: dict[str, Any], *, event_type: str, message: str, detail: dict[str, Any] | None = None
+    ) -> None:
+        """Append one durable progress line for the workspace to render.
+
+        processing_jobs.progress only moves at stage boundaries, so a long
+        download would otherwise show 0% throughout. The workspace already
+        polls GET /jobs/{id}/events every 5s and already renders event.message,
+        which is why this needs no new endpoint and no frontend change.
+        """
+        with self.transaction() as connection, connection.cursor() as cursor:
+            cursor.execute(
+                "select status, stage, progress from public.processing_jobs where id = %s",
+                (task["processing_job_id"],),
+            )
+            job = self._one(cursor)
+            if job is None:
+                return
+            self._insert_event_locked(
+                cursor,
+                task,
+                status=str(job["status"]),
+                stage=str(job["stage"]),
+                progress=int(job["progress"]),
+                attempt=int(task.get("attempt") or 0),
+                event_type=event_type,
+                detail={"message": message, **(detail or {})},
+            )
+
+    def mark_acquisition_downloading(self, acquisition_id: str | UUID, owner_id: str | UUID) -> None:
+        with self.transaction() as connection, connection.cursor() as cursor:
+            cursor.execute(
+                """
+                update public.scene_acquisitions
+                set status = 'downloading'::public.scene_acquisition_status,
+                    failure_code = null, failure_detail = null
+                where id = %s and owner_id = %s
+                  and status in ('queued'::public.scene_acquisition_status,
+                                 'downloading'::public.scene_acquisition_status)
+                """,
+                (acquisition_id, owner_id),
+            )
+
+    def mark_acquisition_downloaded(
+        self,
+        acquisition_id: str | UUID,
+        owner_id: str | UUID,
+        *,
+        storage_bucket: str,
+        storage_key: str,
+        size_bytes: int,
+        checksum_sha256: str | None,
+        artifact_id: str | UUID,
+    ) -> None:
+        with self.transaction() as connection, connection.cursor() as cursor:
+            cursor.execute(
+                """
+                update public.scene_acquisitions
+                set status = 'downloaded'::public.scene_acquisition_status,
+                    storage_bucket = %s, storage_key = %s, downloaded_size_bytes = %s,
+                    checksum_sha256 = %s, artifact_id = %s, downloaded_at = now(),
+                    failure_code = null, failure_detail = null
+                where id = %s and owner_id = %s
+                """,
+                (storage_bucket, storage_key, size_bytes, checksum_sha256, artifact_id,
+                 acquisition_id, owner_id),
+            )
+
+    def mark_acquisition_failed(
+        self, acquisition_id: str | UUID, owner_id: str | UUID, *, code: str, detail: str
+    ) -> None:
+        with self.transaction() as connection, connection.cursor() as cursor:
+            cursor.execute(
+                """
+                update public.scene_acquisitions
+                set status = 'failed'::public.scene_acquisition_status,
+                    failure_code = %s, failure_detail = left(%s, 500)
+                where id = %s and owner_id = %s
+                  and status <> 'downloaded'::public.scene_acquisition_status
+                """,
+                (code, detail, acquisition_id, owner_id),
+            )
+
+    def set_scene_source_artifact(self, task: dict[str, Any], artifact_id: str | UUID) -> None:
+        """Point the scene at its source, as finalize_upload_plan does for uploads."""
+        with self.transaction() as connection, connection.cursor() as cursor:
+            cursor.execute(
+                """
+                update public.scenes set source_artifact_id = %s
+                where id = %s and project_id = %s and owner_id = %s
+                """,
+                (artifact_id, task["scene_id"], task["project_id"], task["owner_id"]),
+            )
 
     def upsert_artifact(
         self, task: dict[str, Any], *, kind: str, logical_key: str, storage_bucket: str,

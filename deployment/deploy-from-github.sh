@@ -90,6 +90,12 @@ files = [
     "20260722002000_m5_grounded_chat_message_modes.sql",
     "20260722003000_m4_rebuild_ready_scene.sql",
     "20260723000000_m5_scene_record_message_modes.sql",
+    # M7 must stay in this order and in two files: PostgreSQL will not let the
+    # 'fetch_source' enum value be used by a column default, function body, or
+    # check expression until the transaction that added it has committed. The
+    # loop below commits each file separately, which is what makes this legal.
+    "20260724000000_m7_acquisition_stage_enum.sql",
+    "20260724001000_m7_scene_acquisitions.sql",
 ]
 mig_dir = pathlib.Path(src) / "supabase" / "migrations"
 with psycopg.connect(dsn) as conn:

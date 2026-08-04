@@ -15,6 +15,7 @@ import json
 import logging
 from pathlib import Path
 import shutil
+import threading
 from typing import Any
 from urllib.error import URLError
 from urllib.request import Request, urlopen
@@ -28,13 +29,19 @@ import rasterio
 from rasterio.enums import Resampling
 
 from app.core.config import settings
+from app.services.acquisitions import copernicus
 from app.services.cache.evidence import invalidate_project_evidence_cache_sync
 from app.services.ingestion.calibration import load_calibration_luts, load_noise_luts
 from app.services.ingestion.file_ingestion import _build_vrt, _build_vrt_local, extract_metadata
 from app.services.models.sarclip_encoder import EncodedPatch, ProgressUpdate, SARCLIPEncoder, encode_patch_stream
 from app.services.processing.patch_pipeline import PATCH_SIZE, _build_channels, extract_and_preprocess_patches
 from app.services.processing.scene_record import build_scene_record
-from app.services.storage.object_store import ObjectStorage, get_object_storage
+from app.services.storage.object_store import ObjectNotFoundError, ObjectStorage, get_object_storage
+from app.services.uploads.validation import (
+    UploadValidationError,
+    assert_iw_grdh_dual_pol_layout,
+    validate_sentinel_archive_file,
+)
 from app.services.storage.payloads import QdrantPatchPayload
 from app.services.storage.qdrant import QdrantStore
 from app.workers.repository import RetryableTaskError, UserFacingTaskError, WorkerRepository
@@ -51,6 +58,11 @@ class StageResult:
 
 
 _NEXT_STAGE: dict[str, tuple[str, str] | None] = {
+    # Only provider-fetched scenes start here. An uploaded scene's first stage
+    # is still validate_upload, and everything from there on is identical:
+    # fetch_source leaves behind exactly the source_archive artifact that
+    # validate_upload head-checks next.
+    "fetch_source": ("validate_upload", "cpu"),
     "validate_upload": ("extract_metadata", "cpu"),
     "extract_metadata": ("build_vrt", "cpu"),
     "build_vrt": ("build_overview", "cpu"),
@@ -76,6 +88,7 @@ PATCH_UPSERT_BATCH_SIZE = 500
 OVERVIEW_MAX_EDGE = 1792
 
 _PROGRESS = {
+    "fetch_source": 3,
     "validate_upload": 5,
     "extract_metadata": 15,
     "build_vrt": 25,
@@ -87,6 +100,124 @@ _PROGRESS = {
     "finalize": 100,
     "cleanup": 100,
 }
+
+
+def _format_bytes(value: int | None) -> str:
+    if value is None or value < 0:
+        return "an unknown amount"
+    if value < 1024 * 1024:
+        return f"{value / 1024:.0f} KB"
+    if value < 1024 * 1024 * 1024:
+        return f"{value / (1024 * 1024):.0f} MB"
+    return f"{value / (1024 * 1024 * 1024):.2f} GB"
+
+
+class _FetchHeartbeat:
+    """Keep a long download's task lease alive and report progress.
+
+    Two jobs in one background thread because they share a cadence:
+
+    * ``M3_TASK_LEASE_SECONDS`` is 300 with no heartbeat of its own, so a 1 GB
+      product throttled to 1 MB/s (~1000s) would be stolen mid-download and its
+      work discarded. Losing the lease is a signal to abort, not to push on.
+    * ``processing_jobs.progress`` only moves at stage boundaries, so a naive
+      build shows 0% for the entire download. The workspace already polls
+      ``GET /jobs/{id}/events`` every 5s and already renders ``event.message``,
+      so writing an event row here gives live progress with no new endpoint and
+      no frontend change.
+
+    Worth knowing and not "fixing": another worker can still reclaim the *Redis
+    stream entry* after 300s, call ``claim_task``, get ``None`` because this
+    lease is fresh, and ``xack`` it away. That is harmless -- on success the
+    next stage enqueues a new dispatch, and on failure ``retry_or_fail_task``
+    resets this one to ``retry_scheduled``.
+    """
+
+    def __init__(
+        self,
+        repository: WorkerRepository,
+        task: dict[str, Any],
+        *,
+        worker_id: str,
+        total_bytes: int | None,
+    ) -> None:
+        self._repository = repository
+        self._task = task
+        self._worker_id = worker_id
+        self._lock = threading.Lock()
+        self._written = 0
+        self._total = total_bytes
+        self._stop = threading.Event()
+        self._lost = threading.Event()
+        self._events_emitted = 0
+        self._thread: threading.Thread | None = None
+
+    def update(self, written: int, total: int | None) -> None:
+        """The download's progress callback. Must stay cheap: it runs per MiB."""
+        with self._lock:
+            self._written = written
+            if total:
+                self._total = total
+
+    def lease_lost(self) -> bool:
+        return self._lost.is_set()
+
+    def __enter__(self) -> "_FetchHeartbeat":
+        interval = max(1, int(settings.COPERNICUS_LEASE_HEARTBEAT_SECONDS))
+        self._thread = threading.Thread(
+            target=self._loop, args=(interval,), name="m7-fetch-heartbeat", daemon=True
+        )
+        self._thread.start()
+        return self
+
+    def __exit__(self, *_exc: Any) -> None:
+        self._stop.set()
+        if self._thread is not None:
+            self._thread.join(timeout=10)
+
+    def _loop(self, interval: int) -> None:
+        while not self._stop.wait(interval):
+            if not self._worker_id:
+                # Nothing to renew against. Keep reporting progress rather than
+                # declaring a lease lost that was never held by this thread.
+                self._emit_progress()
+                continue
+            try:
+                renewed = self._repository.renew_task_lease(self._task, self._worker_id)
+            except Exception:
+                # A transient database blip must not abort a download that is
+                # otherwise fine. Only an authoritative False means stolen.
+                logger.warning("Could not renew the fetch task lease; will retry", exc_info=True)
+                continue
+            if not renewed:
+                logger.warning("The fetch task lease was lost; aborting the download")
+                self._lost.set()
+                return
+            self._emit_progress()
+
+    def _emit_progress(self) -> None:
+        if self._events_emitted >= settings.COPERNICUS_MAX_PROGRESS_EVENTS:
+            return
+        with self._lock:
+            written, total = self._written, self._total
+        if written <= 0:
+            return
+        message = (
+            f"Downloaded {_format_bytes(written)} of {_format_bytes(total)}"
+            if total
+            else f"Downloaded {_format_bytes(written)}"
+        )
+        try:
+            self._repository.record_progress_event(
+                self._task,
+                event_type="fetch_progress",
+                message=message,
+                detail={"downloaded_bytes": written, "total_bytes": total},
+            )
+        except Exception:
+            logger.info("Could not record a fetch progress event", exc_info=True)
+            return
+        self._events_emitted += 1
 
 
 class M3Pipeline:
@@ -104,6 +235,7 @@ class M3Pipeline:
             )
             return StageResult(result, None, _PROGRESS[stage])
         handlers = {
+            "fetch_source": self._fetch_source,
             "validate_upload": self._validate_upload,
             "extract_metadata": self._extract_metadata,
             "build_vrt": self._build_vrt,
@@ -243,6 +375,226 @@ class M3Pipeline:
             "acquisition_date": None,
         }
         return metadata
+
+    @staticmethod
+    def _acquisition_key(task: dict[str, Any], acquisition: dict[str, Any]) -> str:
+        """A stable object key for this acquisition, not for this attempt.
+
+        Deliberately *not* built with ``_artifact_key``, which keys by
+        processing_job_id: a reprocess would then mint a new key and orphan the
+        gigabyte already in the bucket. Keying by acquisition id instead means
+        a retry can head_object the same key and skip the network entirely.
+        """
+        safe_name = str(acquisition["product_name"]).replace("/", "_").replace("\\", "_")
+        return (
+            f"acquisitions/{task['owner_id']}/{task['project_id']}/{task['scene_id']}/"
+            f"{acquisition['id']}/{safe_name}.zip"
+        )
+
+    def _fetch_source(self, task: dict[str, Any]) -> dict[str, Any]:
+        """Download one provider product and leave it as an ordinary source artifact.
+
+        Everything downstream is untouched: this stage produces exactly what
+        ``_validate_upload`` head-checks next, and ``_prepare_vrt`` finds the
+        archive through ``job_sources`` just as it does for an upload.
+        """
+        acquisition = self.repository.scene_acquisition(task)
+        if acquisition is None:
+            raise UserFacingTaskError(
+                "ACQUISITION_MISSING", "This scene has no provider acquisition to download."
+            )
+        try:
+            return self._run_fetch(task, acquisition)
+        except UserFacingTaskError as exc:
+            # Without this the acquisition would stay 'queued'/'downloading'
+            # forever, and both the RPC guard and the one-open-per-scene unique
+            # index would then refuse every future fetch for this scene.
+            self.repository.mark_acquisition_failed(
+                acquisition["id"], task["owner_id"], code=exc.code, detail=str(exc)
+            )
+            raise
+        except Exception as exc:
+            # A retryable failure leaves the row alone so the next attempt can
+            # continue -- but the last attempt is terminal for the job, so the
+            # acquisition has to be closed out with it. Codes mirror the ones
+            # runner.py records for the same two cases.
+            if int(task.get("attempt") or 0) >= int(task.get("max_attempts") or 1):
+                self.repository.mark_acquisition_failed(
+                    acquisition["id"],
+                    task["owner_id"],
+                    code=(
+                        "DEPENDENCY_UNAVAILABLE"
+                        if isinstance(exc, RetryableTaskError)
+                        else "INTERNAL_ERROR"
+                    ),
+                    detail=str(exc) or exc.__class__.__name__,
+                )
+            raise
+
+    def _run_fetch(self, task: dict[str, Any], acquisition: dict[str, Any]) -> dict[str, Any]:
+        # Third layer, after the API accept-time gate and the table CHECK.
+        product_name = str(acquisition["product_name"])
+        if not copernicus.PRODUCT_NAME_PATTERN.match(product_name):
+            raise UserFacingTaskError(
+                "SOURCE_PRODUCT_UNSUPPORTED",
+                "This product is not a dual-polarisation Sentinel-1 IW GRDH scene.",
+            )
+        if acquisition.get("online") is False:
+            raise UserFacingTaskError(
+                "COPERNICUS_PRODUCT_OFFLINE",
+                "This product is in the long-term archive and must be ordered before download.",
+            )
+
+        expected_size = int(acquisition["expected_size_bytes"])
+        key = self._acquisition_key(task, acquisition)
+        checksum: str | None = acquisition.get("checksum_sha256")
+
+        existing = self._existing_object(key)
+        if existing is not None and int(existing.size_bytes) == expected_size:
+            # A retry after an S3 blip, or a reprocess, costs zero provider quota.
+            logger.info("Reusing the already-downloaded product at %s", key)
+            return self._register_source(
+                task, acquisition, key=key, size_bytes=int(existing.size_bytes),
+                checksum=checksum, reused=True,
+            )
+
+        self.repository.mark_acquisition_downloading(acquisition["id"], task["owner_id"])
+        scratch = self._workdir(task) / f"{acquisition['id']}.zip"
+        heartbeat = _FetchHeartbeat(
+            self.repository, task, worker_id=str(task.get("locked_by") or ""),
+            total_bytes=expected_size,
+        )
+        try:
+            with heartbeat:
+                written = copernicus.download_product_to(
+                    str(acquisition["product_id"]),
+                    str(scratch),
+                    expected_size_bytes=expected_size,
+                    progress_callback=heartbeat.update,
+                    should_abort=heartbeat.lease_lost,
+                )
+        except copernicus.CopernicusAbortedError as exc:
+            raise RetryableTaskError("The task lease was lost during the download.") from exc
+        except copernicus.CopernicusAuthError as exc:
+            raise UserFacingTaskError(
+                "COPERNICUS_AUTH_FAILED",
+                "This server's Copernicus credentials were rejected. An operator needs to check them.",
+            ) from exc
+        except copernicus.CopernicusProductNotFoundError as exc:
+            raise UserFacingTaskError(
+                "COPERNICUS_PRODUCT_NOT_FOUND",
+                "That Copernicus product is no longer available for download.",
+            ) from exc
+        except copernicus.CopernicusRedirectRejectedError as exc:
+            raise UserFacingTaskError(
+                "COPERNICUS_REDIRECT_REJECTED",
+                "The Copernicus download redirected somewhere this server will not follow.",
+            ) from exc
+        except copernicus.CopernicusUnavailableError as exc:
+            raise RetryableTaskError("Copernicus is temporarily unavailable.") from exc
+        except copernicus.CopernicusError as exc:
+            raise RetryableTaskError("The Copernicus download failed.") from exc
+
+        if heartbeat.lease_lost():
+            raise RetryableTaskError("The task lease was lost during the download.")
+        if written != expected_size:
+            raise RetryableTaskError(
+                f"The download ended at {written} bytes but {expected_size} were expected."
+            )
+
+        # Same rules and limits as a browser upload.
+        try:
+            validate_sentinel_archive_file(
+                scratch,
+                filename=f"{product_name}.zip",
+                max_zip_entries=settings.UPLOAD_MAX_ZIP_ENTRIES,
+                max_zip_central_directory_bytes=settings.UPLOAD_MAX_ZIP_CENTRAL_DIRECTORY_BYTES,
+                max_zip_uncompressed_bytes=settings.UPLOAD_MAX_ZIP_UNCOMPRESSED_BYTES,
+                max_zip_compression_ratio=settings.UPLOAD_MAX_ZIP_COMPRESSION_RATIO,
+            )
+        except UploadValidationError as exc:
+            raise UserFacingTaskError("SOURCE_ARCHIVE_INVALID", str(exc)) from exc
+
+        # Fetch path only. The catalogue lock is the first defence; this is the
+        # last, and the only one that reads the actual archive.
+        try:
+            layout = assert_iw_grdh_dual_pol_layout(scratch)
+        except UploadValidationError as exc:
+            raise UserFacingTaskError("SOURCE_PRODUCT_UNSUPPORTED", str(exc)) from exc
+
+        checksum = self._sha256_file(scratch)
+        try:
+            # boto3 multiparts a file this size automatically.
+            object_info = self.storage.upload_file(
+                key, str(scratch), "application/zip", {"logical-key": "source-copernicus-archive"}
+            )
+        except Exception as exc:
+            raise RetryableTaskError("Unable to persist the downloaded product to object storage.") from exc
+
+        return self._register_source(
+            task, acquisition, key=key, size_bytes=int(object_info.size_bytes),
+            checksum=checksum, reused=False, layout=layout, downloaded_bytes=written,
+        )
+
+    def _existing_object(self, key: str) -> Any:
+        try:
+            return self.storage.head_object(key)
+        except ObjectNotFoundError:
+            return None
+        except Exception as exc:
+            raise RetryableTaskError("Object storage is temporarily unavailable.") from exc
+
+    def _register_source(
+        self,
+        task: dict[str, Any],
+        acquisition: dict[str, Any],
+        *,
+        key: str,
+        size_bytes: int,
+        checksum: str | None,
+        reused: bool,
+        layout: dict[str, Any] | None = None,
+        downloaded_bytes: int | None = None,
+    ) -> dict[str, Any]:
+        """Publish the fetched object as the scene's source artifact."""
+        metadata = {
+            "provider": str(acquisition.get("provider") or "copernicus"),
+            "product_id": str(acquisition["product_id"]),
+            "product_name": str(acquisition["product_name"]),
+            "product_type": str(acquisition["product_type"]),
+            "polarisation_channels": str(acquisition["polarisation_channels"]),
+            "scene_acquisition_id": str(acquisition["id"]),
+            # The AOI was a search filter, never a crop: this is the whole frame.
+            "aoi_is_crop": False,
+        }
+        if layout:
+            metadata["safe_layout"] = layout
+        artifact = self.repository.upsert_artifact(
+            task,
+            kind="source_archive",
+            # A stable logical key makes the upsert idempotent across retries.
+            logical_key="source:copernicus-archive:v1",
+            storage_bucket=self.bucket,
+            storage_key=key,
+            content_type="application/zip",
+            size_bytes=size_bytes,
+            checksum_sha256=checksum,
+            metadata=metadata,
+        )
+        self.repository.set_scene_source_artifact(task, artifact["id"])
+        self.repository.mark_acquisition_downloaded(
+            acquisition["id"], task["owner_id"],
+            storage_bucket=self.bucket, storage_key=key, size_bytes=size_bytes,
+            checksum_sha256=checksum, artifact_id=artifact["id"],
+        )
+        return {
+            "source_artifact_id": str(artifact["id"]),
+            "scene_acquisition_id": str(acquisition["id"]),
+            "product_name": str(acquisition["product_name"]),
+            "size_bytes": size_bytes,
+            "downloaded_bytes": downloaded_bytes,
+            "reused_existing_object": reused,
+        }
 
     def _validate_upload(self, task: dict[str, Any]) -> dict[str, Any]:
         artifacts = self.repository.job_sources(task)

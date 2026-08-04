@@ -65,11 +65,16 @@ class ReleaseHardeningMiddleware(BaseHTTPMiddleware):
         return request.headers.get("x-real-ip") or (request.client.host if request.client else "unknown")
 
     def _allow_request(self, request: Request) -> bool:
-        limit = (
-            settings.UPLOAD_INITIATE_RATE_LIMIT_PER_MINUTE
-            if request.url.path.endswith("/uploads/initiate")
-            else settings.API_RATE_LIMIT_PER_MINUTE
-        )
+        path = request.url.path
+        if path.endswith("/uploads/initiate"):
+            limit = settings.UPLOAD_INITIATE_RATE_LIMIT_PER_MINUTE
+        elif path.startswith(f"{settings.API_V1_STR}/acquisitions"):
+            # Each of these can cause an upstream provider call or a ~1 GB
+            # server-side transfer, so they get a tighter bucket than the
+            # general control-plane limit.
+            limit = settings.ACQUISITION_RATE_LIMIT_PER_MINUTE
+        else:
+            limit = settings.API_RATE_LIMIT_PER_MINUTE
         bucket = int(time.time() // 60)
         key = f"{settings.REDIS_KEY_PREFIX}:ratelimit:{self._client_key(request)}:{bucket}"
         try:
@@ -99,6 +104,8 @@ def _metric_path(path: str) -> str:
     """Keep labels low-cardinality; UUID-bearing paths must not become labels."""
     if path.startswith("/api/v1/uploads"):
         return "/api/v1/uploads"
+    if path.startswith("/api/v1/acquisitions"):
+        return "/api/v1/acquisitions"
     if path.startswith("/api/v1/jobs"):
         return "/api/v1/jobs"
     if path.startswith("/api/v1/scenes"):

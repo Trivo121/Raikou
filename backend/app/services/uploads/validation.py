@@ -9,13 +9,14 @@ browser without verifying the relevant boundary.
 from __future__ import annotations
 
 import io
+import posixpath
 import stat
 import unicodedata
 import zipfile
 from dataclasses import dataclass
-from pathlib import PurePosixPath
+from pathlib import Path, PurePosixPath
 from struct import Struct
-from typing import Iterable, Literal
+from typing import Any, BinaryIO, Iterable, Literal, Protocol
 from uuid import UUID
 
 from app.schemas.uploads import UploadFileDescriptor, UploadFileKind
@@ -240,8 +241,7 @@ def validate_completed_object(
     if upload_file.kind is UploadFileKind.SOURCE_ARCHIVE:
         _validate_zip_magic(prefix, upload_file.filename)
         _validate_sentinel_zip(
-            storage,
-            object_info,
+            _ObjectRangeSource(storage, object_info),
             max_entries=max_zip_entries,
             max_central_directory_bytes=max_zip_central_directory_bytes,
             max_uncompressed_bytes=max_zip_uncompressed_bytes,
@@ -318,9 +318,166 @@ class _ObjectRangeReader(io.RawIOBase):
         return len(data)
 
 
+class _RangeSource(Protocol):
+    """Bounded random access to an archive, wherever it currently lives.
+
+    The ZIP validators below need the same three operations against an S3
+    object (upload path) and a worker-local file (provider fetch path). Only
+    the adapter differs; every rule stays in one place.
+    """
+
+    @property
+    def size_bytes(self) -> int: ...
+
+    def read_range(self, start: int, end: int) -> bytes: ...
+
+    def open_stream(self) -> BinaryIO: ...
+
+
+class _ObjectRangeSource:
+    """The M2 upload adapter: range reads against private object storage."""
+
+    def __init__(self, storage: ObjectStorage, object_info: ObjectInfo) -> None:
+        self._storage = storage
+        self._object_info = object_info
+
+    @property
+    def size_bytes(self) -> int:
+        return self._object_info.size_bytes
+
+    def read_range(self, start: int, end: int) -> bytes:
+        return self._storage.read_range(self._object_info.key, start, end)
+
+    def open_stream(self) -> BinaryIO:
+        return io.BufferedReader(
+            _ObjectRangeReader(self._storage, self._object_info.key, self._object_info.size_bytes)
+        )
+
+
+class _LocalFileRangeSource:
+    """The worker adapter: a product already streamed to scratch disk."""
+
+    def __init__(self, path: str | Path) -> None:
+        self._path = Path(path)
+        try:
+            self._size_bytes = self._path.stat().st_size
+        except OSError as exc:
+            raise UploadValidationError("The archive could not be read from worker scratch.") from exc
+
+    @property
+    def size_bytes(self) -> int:
+        return self._size_bytes
+
+    def read_range(self, start: int, end: int) -> bytes:
+        with self._path.open("rb") as handle:
+            handle.seek(start)
+            return handle.read(max(0, end - start + 1))
+
+    def open_stream(self) -> BinaryIO:
+        return self._path.open("rb")
+
+
+def validate_sentinel_archive_file(
+    path: str | Path,
+    *,
+    filename: str | None = None,
+    max_zip_entries: int,
+    max_zip_central_directory_bytes: int,
+    max_zip_uncompressed_bytes: int,
+    max_zip_compression_ratio: float,
+) -> None:
+    """Apply the upload archive rules to a locally downloaded product.
+
+    Same rules, same limits, same error type as a browser upload -- a scene
+    source is held to one standard however it arrived.
+    """
+    source = _LocalFileRangeSource(path)
+    name = filename or Path(path).name
+    if source.size_bytes <= 0:
+        raise UploadValidationError(f"{name} is empty.")
+    prefix = source.read_range(0, min(source.size_bytes, 4096) - 1)
+    _validate_zip_magic(prefix, name)
+    _validate_sentinel_zip(
+        source,
+        max_entries=max_zip_entries,
+        max_central_directory_bytes=max_zip_central_directory_bytes,
+        max_uncompressed_bytes=max_zip_uncompressed_bytes,
+        max_compression_ratio=max_zip_compression_ratio,
+    )
+
+
+def assert_iw_grdh_dual_pol_layout(path: str | Path) -> dict[str, Any]:
+    """Require the exact SAFE layout the processing pipeline reads.
+
+    This is the last of three defences, after the catalogue lock and the
+    accept-time re-verification, and it is the only one that inspects actual
+    bytes. It reads the central directory only.
+
+    Deliberately **not** applied to uploads: the upload path accepts a wider
+    range of archives today and narrowing that is a separate, breaking change.
+
+    Returns a small summary worth recording on the artifact.
+    """
+    try:
+        with zipfile.ZipFile(_LocalFileRangeSource(path).open_stream()) as archive:
+            names = archive.namelist()
+    except (OSError, ValueError, zipfile.BadZipFile) as exc:
+        raise UploadValidationError("The downloaded archive could not be read.") from exc
+
+    manifests = [name for name in names if name.casefold().endswith(".safe/manifest.safe")]
+    if len(manifests) != 1:
+        raise UploadValidationError(
+            "A Sentinel-1 product must contain exactly one SAFE manifest."
+        )
+
+    measurements = [
+        name
+        for name in names
+        if "/measurement/" in name.casefold() and name.casefold().endswith((".tif", ".tiff"))
+    ]
+    by_polarisation: dict[str, list[str]] = {"vv": [], "vh": []}
+    for name in measurements:
+        base = posixpath.basename(name).casefold()
+        has_vv, has_vh = "vv" in base, "vh" in base
+        # stages.py sorts bands with `0 if "vv" in name else 1`, so an
+        # ambiguous name would silently produce the wrong band order.
+        if has_vv == has_vh:
+            raise UploadValidationError(
+                "A measurement band could not be identified as VV or VH."
+            )
+        by_polarisation["vv" if has_vv else "vh"].append(name)
+
+    if len(measurements) != 2 or len(by_polarisation["vv"]) != 1 or len(by_polarisation["vh"]) != 1:
+        raise UploadValidationError(
+            "This pipeline needs exactly two measurement bands, one VV and one VH."
+        )
+
+    # Calibration and thermal-noise LUTs are read together so a scene cannot
+    # end up calibrated but not denoised, which leaves the cross-pol ratio
+    # wrong over water while every other number looks correct.
+    for polarisation in ("vv", "vh"):
+        for prefix in ("calibration-", "noise-"):
+            if not any(
+                "/annotation/calibration/" in name.casefold()
+                and posixpath.basename(name).casefold().startswith(prefix)
+                and polarisation in posixpath.basename(name).casefold()
+                for name in names
+            ):
+                raise UploadValidationError(
+                    f"The product is missing its {prefix.rstrip('-')} annotation "
+                    f"for {polarisation.upper()}."
+                )
+
+    return {
+        "manifest": manifests[0],
+        "measurement_vv": by_polarisation["vv"][0],
+        "measurement_vh": by_polarisation["vh"][0],
+        "entry_count": len(names),
+    }
+
+
 def _validate_sentinel_zip(
-    storage: ObjectStorage,
-    object_info: ObjectInfo,
+    source: _RangeSource,
     *,
     max_entries: int,
     max_central_directory_bytes: int,
@@ -328,15 +485,12 @@ def _validate_sentinel_zip(
     max_compression_ratio: float,
 ) -> None:
     _validate_zip_central_directory_bounds(
-        storage,
-        object_info,
+        source,
         max_entries=max_entries,
         max_central_directory_bytes=max_central_directory_bytes,
     )
     try:
-        with zipfile.ZipFile(
-            io.BufferedReader(_ObjectRangeReader(storage, object_info.key, object_info.size_bytes))
-        ) as archive:
+        with zipfile.ZipFile(source.open_stream()) as archive:
             entries = archive.infolist()
     except (OSError, ValueError, zipfile.BadZipFile) as exc:
         raise UploadValidationError("The uploaded ZIP archive could not be read safely.") from exc
@@ -371,8 +525,7 @@ def _validate_sentinel_zip(
 
 
 def _validate_zip_central_directory_bounds(
-    storage: ObjectStorage,
-    object_info: ObjectInfo,
+    source: _RangeSource,
     *,
     max_entries: int,
     max_central_directory_bytes: int,
@@ -384,13 +537,13 @@ def _validate_zip_central_directory_bounds(
     and offsets into a small preceding structure, whose fixed portion is read
     independently. Multi-disk archives are outside V1's supported format.
     """
-    if object_info.size_bytes < _ZIP_EOCD.size:
+    if source.size_bytes < _ZIP_EOCD.size:
         raise UploadValidationError("The uploaded ZIP archive is too small to contain valid metadata.")
     if max_entries < 1 or max_central_directory_bytes < 1:
         raise ValueError("ZIP metadata limits must be positive.")
 
-    tail_start = max(0, object_info.size_bytes - _ZIP_EOCD_MAX_SEARCH_BYTES)
-    tail = storage.read_range(object_info.key, tail_start, object_info.size_bytes - 1)
+    tail_start = max(0, source.size_bytes - _ZIP_EOCD_MAX_SEARCH_BYTES)
+    tail = source.read_range(tail_start, source.size_bytes - 1)
     eocd_relative_offset = _find_zip_eocd(tail)
     eocd_offset = tail_start + eocd_relative_offset
     (
@@ -417,8 +570,7 @@ def _validate_zip_central_directory_bounds(
     if uses_zip64:
         if eocd_offset < _ZIP64_EOCD_LOCATOR.size:
             raise UploadValidationError("The ZIP64 metadata locator is missing.")
-        locator = storage.read_range(
-            object_info.key,
+        locator = source.read_range(
             eocd_offset - _ZIP64_EOCD_LOCATOR.size,
             eocd_offset - 1,
         )
@@ -429,11 +581,10 @@ def _validate_zip_central_directory_bounds(
             locator_signature != _ZIP64_EOCD_LOCATOR_SIGNATURE
             or locator_disk != 0
             or locator_disks != 1
-            or zip64_eocd_offset + _ZIP64_EOCD.size > object_info.size_bytes
+            or zip64_eocd_offset + _ZIP64_EOCD.size > source.size_bytes
         ):
             raise UploadValidationError("The ZIP64 metadata locator is invalid.")
-        zip64_eocd = storage.read_range(
-            object_info.key,
+        zip64_eocd = source.read_range(
             zip64_eocd_offset,
             zip64_eocd_offset + _ZIP64_EOCD.size - 1,
         )

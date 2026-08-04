@@ -24,6 +24,11 @@ class ProcessingJobKind(str, Enum):
 
 
 class ProcessingJobStage(str, Enum):
+    # Every label in public.processing_job_stage must have a member here.
+    # This enum is strict, so a stage present in the database but missing
+    # below turns GET /jobs/{id} and /events into a 500 for the whole time
+    # a job sits in it -- which the workspace polls every 1.5-12s.
+    FETCH_SOURCE = "fetch_source"
     VALIDATE_UPLOAD = "validate_upload"
     EXTRACT_METADATA = "extract_metadata"
     BUILD_VRT = "build_vrt"

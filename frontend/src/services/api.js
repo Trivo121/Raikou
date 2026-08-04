@@ -15,6 +15,9 @@ const API_BASE_URL = (
 const DEFAULT_REQUEST_TIMEOUT_MS = 30_000;
 const UPLOAD_COMPLETION_TIMEOUT_MS = 20 * 60_000;
 const UPLOAD_REVOKE_TIMEOUT_MS = 15_000;
+// The catalogue search is a server-side proxy to an upstream OData endpoint
+// that is not fast; the default 30s times out on a wide area or date range.
+const ACQUISITION_SEARCH_TIMEOUT_MS = 45_000;
 
 export const apiPaths = {
   projects: '/api/v1/projects',
@@ -42,6 +45,10 @@ export const apiPaths = {
   uploadPlanStatus: (planId) => `/api/v1/uploads/${encodeURIComponent(planId)}/status`,
   uploadPartsSign: (planId) => `/api/v1/uploads/${encodeURIComponent(planId)}/parts/sign`,
   uploadComplete: (planId) => `/api/v1/uploads/${encodeURIComponent(planId)}/complete`,
+  acquisitionProviders: '/api/v1/acquisitions/providers',
+  acquisitionSearch: '/api/v1/acquisitions/search',
+  acquisitions: '/api/v1/acquisitions',
+  acquisition: (acquisitionId) => `/api/v1/acquisitions/${encodeURIComponent(acquisitionId)}`,
   job: (jobId) => `/api/v1/jobs/${encodeURIComponent(jobId)}`,
   jobEvents: (jobId, beforeId) => `/api/v1/jobs/${encodeURIComponent(jobId)}/events${beforeId ? `?before_id=${encodeURIComponent(beforeId)}` : ''}`,
   jobCancel: (jobId) => `/api/v1/jobs/${encodeURIComponent(jobId)}/cancel`,
@@ -327,6 +334,32 @@ export function createApiClient(getAccessToken) {
       },
       abort(planId, { signal, timeoutMs = UPLOAD_REVOKE_TIMEOUT_MS } = {}) {
         return request(apiPaths.uploadPlan(planId), { method: 'DELETE', signal, timeoutMs });
+      },
+    },
+    acquisitions: {
+      // Availability and limits only. No provider credential or upstream URL
+      // ever reaches the browser; search is proxied by FastAPI.
+      providers({ signal } = {}) {
+        return request(apiPaths.acquisitionProviders, { signal });
+      },
+      search(input, { signal, timeoutMs = ACQUISITION_SEARCH_TIMEOUT_MS } = {}) {
+        return request(apiPaths.acquisitionSearch, {
+          method: 'POST',
+          body: JSON.stringify(input),
+          signal,
+          timeoutMs,
+        });
+      },
+      start(input, { signal, timeoutMs } = {}) {
+        return request(apiPaths.acquisitions, {
+          method: 'POST',
+          body: JSON.stringify(input),
+          signal,
+          timeoutMs,
+        });
+      },
+      async get(acquisitionId, { signal } = {}) {
+        return unwrapEntity(await request(apiPaths.acquisition(acquisitionId), { signal }), ['acquisition', 'data']);
       },
     },
     artifacts: {

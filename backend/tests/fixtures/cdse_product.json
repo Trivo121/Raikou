@@ -1,0 +1,22 @@
+{
+  "@odata.context": "$metadata#Products/$entity",
+  "Id": "b2c3d4e5-f6a7-4b8c-9d0e-1f2a3b4c5d6e",
+  "Name": "S1A_IW_GRDH_1SDV_20260702T003056_20260702T003121_054321_069ABC_1234.SAFE",
+  "ContentType": "application/octet-stream",
+  "ContentLength": 1073741824,
+  "Online": true,
+  "ContentDate": {
+    "Start": "2026-07-02T00:30:56.123456Z",
+    "End": "2026-07-02T00:31:21.987654Z"
+  },
+  "GeoFootprint": {
+    "type": "Polygon",
+    "coordinates": [
+      [[80.1, 12.9], [82.4, 13.3], [82.0, 14.8], [79.7, 14.4], [80.1, 12.9]]
+    ]
+  },
+  "Attributes": [
+    {"@odata.type": "#OData.CSC.StringAttribute", "Name": "productType", "Value": "IW_GRDH_1S"},
+    {"@odata.type": "#OData.CSC.StringAttribute", "Name": "polarisationChannels", "Value": "VV&VH"}
+  ]
+}

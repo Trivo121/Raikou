@@ -301,3 +301,32 @@ async def resolve_owned_upload_plan(
     if upload_plan is None:
         raise HTTPException(status_code=404, detail="Upload plan not found")
     return upload_plan
+
+
+async def resolve_owned_scene_acquisition(
+    acquisition_id: UUID | str,
+    current_user: CurrentUser,
+    *,
+    supabase: Client | None = None,
+) -> dict[str, Any]:
+    """Resolve a provider acquisition only for its verified owner."""
+    try:
+        client = supabase or get_supabase()
+        response = await run_in_threadpool(
+            lambda: client.table("scene_acquisitions")
+            .select("*")
+            .eq("id", str(acquisition_id))
+            .eq("owner_id", current_user.id)
+            .limit(1)
+            .execute()
+        )
+    except Exception:
+        logger.exception("Failed to resolve scene acquisition ownership")
+        raise HTTPException(
+            status_code=503, detail="Acquisition data is temporarily unavailable"
+        ) from None
+
+    acquisition = _first_row(response)
+    if acquisition is None:
+        raise HTTPException(status_code=404, detail="Acquisition not found")
+    return acquisition

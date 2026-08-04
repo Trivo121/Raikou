@@ -10,6 +10,7 @@ import {
   uploadMultipartPlan,
 } from '../services/multipartUpload';
 import { formatBytes, supportedInputDescription, validateUploadFiles } from '../utils/uploadValidation';
+import { createClientRequestId } from '../utils/helpers';
 
 const PLAN_REVOKE_TIMEOUT_MS = 15_000;
 const PENDING_COMPLETION_MAX_AGE_MS = 24 * 60 * 60_000;
@@ -111,16 +112,6 @@ function clearPendingInitiation(userId, sceneId, { requestId, planId } = {}) {
   } catch {
     // Best effort only; an exact request ID prevents cross-upload recovery.
   }
-}
-
-function createClientRequestId() {
-  if (typeof globalThis.crypto?.randomUUID === 'function') return globalThis.crypto.randomUUID();
-  const randomHex = () => Math.floor(Math.random() * 0x100000000).toString(16).padStart(8, '0');
-  const first = randomHex();
-  const second = randomHex();
-  const third = randomHex();
-  const fourth = randomHex();
-  return `${first}-${second.slice(0, 4)}-4${second.slice(5, 8)}-${((8 + Math.floor(Math.random() * 4)).toString(16))}${third.slice(1, 4)}-${third.slice(4)}${fourth}`;
 }
 
 function waitForRecoveryDelay(delayMs, signal) {
