@@ -5,12 +5,42 @@ import { AttributionControl, LngLatBounds, Map as MapLibreMap, NavigationControl
 import 'maplibre-gl/dist/maplibre-gl.css';
 import { Square, Trash2 } from 'lucide-react';
 
-// CARTO dark-matter: free, token-free, and already the right palette for the
-// workspace, so no CSS filter hack over a light basemap. Attribution is
-// required, and the style JSON already carries "© CARTO, © OpenStreetMap
-// contributors" on its sources -- passing customAttribution as well renders it
-// twice, so the control below only sets `compact`.
-const BASEMAP_STYLE = 'https://basemaps.cartocdn.com/gl/dark-matter-gl-style/style.json';
+// OpenStreetMap raster tiles, declared inline rather than fetched as a style
+// URL. A vector basemap needs three more round trips before anything is drawn
+// -- the style JSON, the TileJSON it points at, then glyph and sprite atlases
+// -- and every one of them fails silently, leaving a correctly constructed map
+// that renders nothing. One raster source removes all of that indirection.
+//
+// The tiles are dimmed and desaturated rather than swapped for a dark style,
+// which keeps the workspace palette without depending on a second provider.
+// Attribution is required by the ODbL and is carried on the source, so
+// AttributionControl below renders it without needing customAttribution.
+//
+// Note for scale: tile.openstreetmap.org is a volunteer service with a usage
+// policy. Fine at this traffic; move to a self-hosted or paid tile source
+// before this is in front of many users.
+const BASEMAP_STYLE = {
+  version: 8,
+  sources: {
+    osm: {
+      type: 'raster',
+      tiles: ['https://tile.openstreetmap.org/{z}/{x}/{y}.png'],
+      tileSize: 256,
+      maxzoom: 19,
+      attribution: '© OpenStreetMap contributors',
+    },
+  },
+  layers: [{
+    id: 'osm',
+    type: 'raster',
+    source: 'osm',
+    paint: {
+      'raster-brightness-max': 0.62,
+      'raster-saturation': -0.45,
+      'raster-contrast': 0.05,
+    },
+  }],
+};
 
 const EMPTY = { type: 'FeatureCollection', features: [] };
 
@@ -102,8 +132,10 @@ export default function AoiMapPicker({ value, onChange, footprints, selectedId, 
         type: 'fill',
         source: 'footprints',
         paint: {
-          'fill-color': ['case', ['==', ['get', 'selected'], 1], '#38bdf8', '#a1a1aa'],
-          'fill-opacity': ['case', ['==', ['get', 'selected'], 1], 0.22, 0.06],
+          // Raised from 0.06: a flat dark basemap made that readable, but
+          // raster tiles carry roads and terrain underneath it.
+          'fill-color': ['case', ['==', ['get', 'selected'], 1], '#38bdf8', '#d4d4d8'],
+          'fill-opacity': ['case', ['==', ['get', 'selected'], 1], 0.28, 0.14],
         },
       });
       map.addLayer({
