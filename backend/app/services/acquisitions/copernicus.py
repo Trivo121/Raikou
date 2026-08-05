@@ -502,7 +502,11 @@ def search_products(
 
 def get_product(product_id: str) -> CopernicusProduct:
     """Re-fetch one product so accept-time never trusts browser-sent values."""
-    url = f"{settings.COPERNICUS_CATALOGUE_URL}/Products('{_safe_product_id(product_id)}')"
+    # The Products key is a GUID, not a string: quoting it makes OData reject
+    # the type and return 422, which surfaced as "Copernicus returned an
+    # unexpected response" on every fetch. _safe_product_id still guarantees a
+    # UUID, so nothing caller-supplied shapes the path.
+    url = f"{settings.COPERNICUS_CATALOGUE_URL}/Products({_safe_product_id(product_id)})"
     try:
         with _http_client(settings.COPERNICUS_SEARCH_TIMEOUT_SECONDS) as client:
             response = client.get(url, params={"$expand": "Attributes"})
