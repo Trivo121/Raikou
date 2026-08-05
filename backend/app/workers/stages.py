@@ -576,21 +576,29 @@ class M3Pipeline:
             raise RetryableTaskError(str(exc)) from exc
 
         self.repository.mark_acquisition_downloading(acquisition["id"], task["owner_id"])
+        # No total to report: a subset is rendered on demand, so its size is not
+        # known until the response arrives. The heartbeat still matters -- the
+        # render itself can outrun the task lease on a large box.
         heartbeat = _FetchHeartbeat(
-            self.repository, task, worker_id=str(task.get("locked_by") or ""),
+            self.repository, task,
+            worker_id=str(task.get("locked_by") or ""),
+            total_bytes=None,
         )
         scratch = self._workdir(task) / "subset"
-        heartbeat.start()
-        try:
-            result = subset_service.fetch_subset(product, bbox, scratch)
-        except subset_service.SubsetTooLargeError as exc:
-            raise UserFacingTaskError("SUBSET_AREA_TOO_LARGE", str(exc)) from exc
-        except copernicus.CopernicusAuthError as exc:
-            raise UserFacingTaskError("COPERNICUS_AUTH_FAILED", str(exc)) from exc
-        except copernicus.CopernicusError as exc:
-            raise RetryableTaskError(str(exc)) from exc
-        finally:
-            heartbeat.stop()
+        with heartbeat:
+            try:
+                result = subset_service.fetch_subset(product, bbox, scratch)
+            except subset_service.SubsetTooLargeError as exc:
+                raise UserFacingTaskError("SUBSET_AREA_TOO_LARGE", str(exc)) from exc
+            except copernicus.CopernicusAuthError as exc:
+                raise UserFacingTaskError("COPERNICUS_AUTH_FAILED", str(exc)) from exc
+            except copernicus.CopernicusError as exc:
+                raise RetryableTaskError(str(exc)) from exc
+
+        # Finishing work the lease no longer covers would have it discarded by
+        # complete_task's locked_by guard, so stop here rather than upload.
+        if heartbeat.lease_lost():
+            raise RetryableTaskError("The task lease was lost while rendering the subset.")
 
         scene_metadata = product.scene_metadata(subset={
             "radiometry": SIGMA0_LINEAR,
