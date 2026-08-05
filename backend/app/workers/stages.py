@@ -799,6 +799,23 @@ class M3Pipeline:
                                            model_name=settings.SARCLIP_MODEL_NAME, model_version=settings.SARCLIP_MODEL_VERSION)
         return {"indexed_vectors": indexed, "embedding_manifest_artifact_id": str(manifest["id"])}
 
+    @staticmethod
+    def _source_radiometry(artifacts: list[dict[str, Any]]) -> str:
+        """How this scene's pixels encode backscatter.
+
+        Recorded on the source artifact at the moment it is created, because
+        only whatever fetched it knows. Absent on every scene created before
+        provider subsets existed, and every one of those is a SAFE product, so
+        the fallback is the LUT path.
+        """
+        from app.services.processing.radiometry import DN_WITH_LUTS, normalize_radiometry
+
+        for artifact in artifacts:
+            metadata = artifact.get("metadata")
+            if isinstance(metadata, dict) and metadata.get("radiometry"):
+                return normalize_radiometry(metadata.get("radiometry"))
+        return DN_WITH_LUTS
+
     def _annotation_luts(
         self, task: dict[str, Any], artifacts: list[dict[str, Any]]
     ) -> tuple[dict[str, Any], dict[str, Any]]:
@@ -839,10 +856,11 @@ class M3Pipeline:
             )
             detector_artifact_id = str(detector_artifact["id"])
         calibration, noise = self._annotation_luts(task, artifacts)
+        radiometry = self._source_radiometry(artifacts)
         try:
             record = build_scene_record(session_id=str(task["scene_id"]), session_dir=str(workdir), vrt_path=str(vrt_path),
                                         scene_metadata=metadata, detector_results_path=str(detector_path) if detector_path else None,
-                                        calibration=calibration, noise=noise)
+                                        calibration=calibration, noise=noise, radiometry=radiometry)
         except (OSError, ValueError, rasterio.errors.RasterioError) as exc:
             raise UserFacingTaskError("EVIDENCE_BUILD_FAILED", "The detector-backed evidence record could not be created.") from exc
         caption = self._caption_overview(task)

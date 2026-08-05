@@ -220,13 +220,22 @@ def classify_scene(
     device: str | None = None,
     max_windows: int = MAX_SAMPLE_WINDOWS,
     batch_size: int = 32,
+    radiometry: str | None = None,
 ) -> LandCoverResult:
     """Score a uniform grid of native-resolution windows across the scene.
 
     ``dataset`` is an open rasterio dataset whose band 1 is VV and band 2 is VH,
     matching the VRT built at ingestion.
+
+    ``calibration`` is required only when the pixels are detected amplitude.  A
+    provider subset arrives as sigma0 already, and demanding LUTs for one of
+    those would refuse a scene the classifier can score perfectly well.
     """
     import torch
+
+    from app.services.processing.radiometry import sigma0_db_from_linear, uses_luts
+
+    needs_luts = uses_luts(radiometry)
     from rasterio.windows import Window
 
     if dataset.count < 2:
@@ -234,11 +243,12 @@ def classify_scene(
             "BEN Sentinel-1 weights need both VV and VH; this scene has "
             f"{dataset.count} band(s)"
         )
-    missing_pol = [pol for pol in BEN_S1_BAND_ORDER if pol not in calibration]
-    if missing_pol:
-        raise LandCoverUnavailable(
-            "no sigmaNought calibration LUT for " + ", ".join(missing_pol)
-        )
+    if needs_luts:
+        missing_pol = [pol for pol in BEN_S1_BAND_ORDER if pol not in (calibration or {})]
+        if missing_pol:
+            raise LandCoverUnavailable(
+                "no sigmaNought calibration LUT for " + ", ".join(missing_pol)
+            )
 
     origins = _grid_origins(dataset.width, dataset.height, max_windows)
     if not origins:
@@ -267,12 +277,16 @@ def classify_scene(
         if np.count_nonzero(raw == 0) / raw.size > NODATA_DISCARD_FRACTION:
             continue
 
-        vv_db = dn_to_sigma0_db(
-            raw[0], calibration["VV"].window(row_off, col_off, BEN_IMAGE_SIZE, BEN_IMAGE_SIZE)
-        )
-        vh_db = dn_to_sigma0_db(
-            raw[1], calibration["VH"].window(row_off, col_off, BEN_IMAGE_SIZE, BEN_IMAGE_SIZE)
-        )
+        if needs_luts:
+            vv_db = dn_to_sigma0_db(
+                raw[0], calibration["VV"].window(row_off, col_off, BEN_IMAGE_SIZE, BEN_IMAGE_SIZE)
+            )
+            vh_db = dn_to_sigma0_db(
+                raw[1], calibration["VH"].window(row_off, col_off, BEN_IMAGE_SIZE, BEN_IMAGE_SIZE)
+            )
+        else:
+            vv_db = sigma0_db_from_linear(raw[0])
+            vh_db = sigma0_db_from_linear(raw[1])
         batch.append(normalize_sigma0_db(vv_db, vh_db))
         if len(batch) >= batch_size:
             flush()

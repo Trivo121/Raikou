@@ -47,6 +47,7 @@ def build_scene_record(
     detector_results_path: str | None = None,
     calibration: dict[str, Any] | None = None,
     noise: dict[str, Any] | None = None,
+    radiometry: str | None = None,
 ) -> dict[str, Any]:
     """Build and atomically persist the canonical scene record.
 
@@ -62,13 +63,14 @@ def build_scene_record(
     with rasterio.open(vrt_path) as dataset:
         scene = _scene_details(dataset, session_id, scene_metadata)
         land_water = _estimate_land_water_context(dataset)
-        land_cover = _estimate_land_cover(dataset, scene_metadata, calibration)
+        land_cover = _estimate_land_cover(dataset, scene_metadata, calibration, radiometry=radiometry)
         scattering = _estimate_scattering(
             dataset,
             calibration,
             noise,
             session_dir=session_dir,
             scene_name=str(scene.get("name") or "") or None,
+            radiometry=radiometry,
         )
         raw_detections, detector, validation_errors = _read_detector_results(
             detector_results_path,
@@ -232,27 +234,32 @@ def _estimate_land_cover(
     dataset: rasterio.io.DatasetReader,
     scene_metadata: dict[str, Any],
     calibration: dict[str, Any] | None = None,
+    *,
+    radiometry: str | None = None,
 ) -> dict[str, Any]:
     """Attach BigEarthNet land-cover context when the scene can support it.
 
-    Requires both polarisations and the sigmaNought LUTs: the classifier was
-    trained on calibrated decibels, so running it on raw digital numbers would
-    produce confident nonsense rather than a weaker result.  The LUTs are
-    supplied by the caller rather than read from ``scene_metadata`` because they
-    are far too large to live in the scene's metadata row.  Any shortfall is
-    recorded as an unavailable block instead of raising, because land cover is
-    context and must never fail a scene.
+    The classifier was trained on calibrated decibels, so it needs sigma0 in dB
+    and both polarisations.  For a SAFE product that means the sigmaNought
+    LUTs, supplied by the caller rather than read from ``scene_metadata``
+    because they are far too large to live in the scene's metadata row.  A
+    provider subset already carries sigma0, so it needs no LUTs at all and the
+    LUT check below would otherwise reject a scene it can classify perfectly
+    well.  Any shortfall is recorded as an unavailable block instead of
+    raising, because land cover is context and must never fail a scene.
     """
     from app.core.config import settings
     from app.services.models import land_cover as land_cover_module
+    from app.services.processing.radiometry import uses_luts
 
     if not settings.LAND_COVER_ENABLED:
         return land_cover_module.build_land_cover_block(
             None, unavailable_reason="land-cover estimation is disabled by configuration"
         )
 
+    needs_luts = uses_luts(radiometry)
     domain = land_cover_module.assess_domain(*_scene_centroid(dataset, scene_metadata))
-    if not calibration:
+    if needs_luts and not calibration:
         return land_cover_module.build_land_cover_block(
             None,
             domain=domain,
@@ -269,13 +276,14 @@ def _estimate_land_cover(
                 if isinstance(value, land_cover_module.SigmaNoughtLUT)
                 else land_cover_module.SigmaNoughtLUT.from_dict(value)
             )
-            for polarisation, value in calibration.items()
-        }
+            for polarisation, value in (calibration or {}).items()
+        } if needs_luts else {}
         result = land_cover_module.classify_scene(
             dataset,
             luts,
             checkpoint_dir=settings.LAND_COVER_CHECKPOINT_DIR,
             device=settings.LAND_COVER_DEVICE,
+            radiometry=radiometry,
         )
     except land_cover_module.LandCoverUnavailable as exc:
         return land_cover_module.build_land_cover_block(
@@ -296,10 +304,18 @@ def _estimate_scattering(
     *,
     session_dir: str | None = None,
     scene_name: str | None = None,
+    radiometry: str | None = None,
 ) -> dict[str, Any] | None:
     """Describe the scene by scattering mechanism, which travels between regions.
 
-    Needs both polarisations, the sigmaNought LUTs and the noise LUTs.  The last
+    Needs both polarisations, and -- for a SAFE product -- the sigmaNought and
+    noise LUTs.  A provider subset arrives with sigma0 already derived, so it
+    needs neither; ``radiometry`` says which case this is.  The distinction
+    matters because the LUT-shaped gate below used to reject a calibrated
+    subset outright and return ``None`` in silence.
+
+    The noise LUT is not optional on the SAFE path.  The reason: VH runs about
+    7 dB below VV and therefore lands on the
     is not optional: VH runs about 7 dB below VV and therefore lands on the
     receiver noise floor over exactly the smooth surfaces the cross-pol ratio is
     used to identify, and a ratio built on that floor is wrong where it matters
@@ -311,7 +327,12 @@ def _estimate_scattering(
     Returns ``None`` for anything it cannot do, because scene context must never
     stop a scene reaching ready.
     """
-    if dataset.count < 2 or not calibration or not noise:
+    from app.services.processing.radiometry import sigma0_db_from_linear, uses_luts
+
+    needs_luts = uses_luts(radiometry)
+    if dataset.count < 2:
+        return None
+    if needs_luts and (not calibration or not noise):
         return None
     try:
         from app.services.ingestion.calibration import NoiseLUT, SigmaNoughtLUT, dn_to_sigma0_db
@@ -325,10 +346,13 @@ def _estimate_scattering(
         def _as(kind, value):
             return value if isinstance(value, kind) else kind.from_dict(value)
 
-        cal = {pol: _as(SigmaNoughtLUT, value) for pol, value in calibration.items()}
-        noi = {pol: _as(NoiseLUT, value) for pol, value in noise.items()}
-        if not {"VV", "VH"} <= set(cal) or not {"VV", "VH"} <= set(noi):
-            return None
+        cal: dict[str, Any] = {}
+        noi: dict[str, Any] = {}
+        if needs_luts:
+            cal = {pol: _as(SigmaNoughtLUT, value) for pol, value in calibration.items()}
+            noi = {pol: _as(NoiseLUT, value) for pol, value in noise.items()}
+            if not {"VV", "VH"} <= set(cal) or not {"VV", "VH"} <= set(noi):
+                return None
 
         windows = []
         for row_off, col_off in _grid_origins(dataset.width, dataset.height, SCATTERING_MAX_WINDOWS):
@@ -337,21 +361,30 @@ def _estimate_scattering(
                 continue
             if np.count_nonzero(raw == 0) / raw.size > 0.40:
                 continue
-            bands = []
-            for index, polarisation in enumerate(("VV", "VH")):
-                bands.append(
+            if needs_luts:
+                bands = [
                     dn_to_sigma0_db(
                         raw[index],
                         cal[polarisation].window(row_off, col_off, 120, 120),
                         noise=noi[polarisation].window(row_off, col_off, 120, 120),
                     )
-                )
+                    for index, polarisation in enumerate(("VV", "VH"))
+                ]
+            else:
+                # Provider sigma0 in linear power. summarize_window wants dB and
+                # converts back internally, so this hands it the same quantity
+                # the LUT branch produces, by a shorter route.
+                bands = [sigma0_db_from_linear(raw[0]), sigma0_db_from_linear(raw[1])]
             windows.append(summarize_window(bands[0], bands[1]))
 
         if not windows:
             return None
         thresholds = fit_thresholds(windows)
-        block = build_scattering_block(windows, thresholds, is_denoised=True)
+        # Only the LUT path subtracts thermal noise, and chat quotes this
+        # verbatim as "after thermal-noise removal". Claiming it on a path that
+        # never ran a noise LUT would put a false provenance claim in front of
+        # a reader.
+        block = build_scattering_block(windows, thresholds, is_denoised=needs_luts)
         if block is None:
             return None
 
@@ -361,7 +394,8 @@ def _estimate_scattering(
         # attempted separately and never allowed to cost us the block.
         try:
             block["map"] = _render_scattering_map(
-                dataset, cal, noi, thresholds, session_dir=session_dir, scene_name=scene_name
+                dataset, cal, noi, thresholds,
+                session_dir=session_dir, scene_name=scene_name, radiometry=radiometry,
             )
             _adopt_map_fractions(block)
         except Exception:
@@ -412,15 +446,19 @@ def _render_scattering_map(
     *,
     session_dir: str | None,
     scene_name: str | None,
+    radiometry: str | None = None,
 ) -> dict[str, Any] | None:
     """Classify the full raster onto a block-mean grid and write the PNG."""
+    from app.services.processing.radiometry import normalize_radiometry
     from app.services.processing.scattering_map import (
         compute_mechanism_map,
         map_payload,
         render_mechanism_png,
     )
 
-    mechanism_map = compute_mechanism_map(dataset, calibration, noise, thresholds)
+    mechanism_map = compute_mechanism_map(
+        dataset, calibration, noise, thresholds, radiometry=normalize_radiometry(radiometry)
+    )
     if mechanism_map is None:
         return None
     payload = map_payload(mechanism_map)

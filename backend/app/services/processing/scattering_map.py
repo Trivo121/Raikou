@@ -17,10 +17,16 @@ averaging decibels, both bias the result low.  A block factor of six gives 36
 looks and drops the ratio's noise well inside the gap between the fitted
 thresholds, at a cost of 60 m ground sampling.
 
-The output is in radar geometry.  A GRD band carries no CRS, so this image
-aligns pixel-for-pixel with the scene overview built from the same VRT and does
-not align with a map.  Overlaying it on a basemap needs terrain correction
-against a DEM, which is a different piece of work entirely.
+A GRD band carries no CRS, so for a full frame the output is in radar geometry:
+it aligns pixel-for-pixel with the scene overview built from the same VRT and
+does not align with a map.  Overlaying that on a basemap needs terrain
+correction against a DEM, which is a different piece of work entirely.
+
+A provider subset arrives orthorectified and carries a transform, so its map is
+map-projected and its ground sampling is measured rather than assumed.  Which
+of the two a given map is comes back on ``MechanismMap.geometry`` and is stated
+in the caption, because a reader who overlays a radar-geometry image on a
+basemap gets a confidently wrong answer.
 """
 
 from __future__ import annotations
@@ -33,6 +39,12 @@ from typing import Any
 import numpy as np
 
 from app.services.ingestion.calibration import NoiseLUT, SigmaNoughtLUT, dn_to_sigma0_db
+from app.services.processing.radiometry import DN_WITH_LUTS
+
+# The design point in the module docstring: six 10 m pixels a side gives 36
+# looks, which drops the ratio's noise inside the gap between the fitted
+# thresholds, at a cost of 60 m cells.
+TARGET_GROUND_SAMPLING_M = 60.0
 from app.services.processing.scattering import (
     MECHANISM_DESCRIPTIONS,
     MECHANISMS,
@@ -69,6 +81,10 @@ class MechanismMap:
     ground_sampling_m: float
     looks: int
     valid_fraction: float
+    # "radar" for a GRD, which has no CRS, or "map" for an orthorectified
+    # subset. The caption states this either way: a reader who overlays a
+    # radar-geometry image on a basemap gets a wrong answer that looks right.
+    geometry: str = "radar"
 
     @property
     def shape(self) -> tuple[int, int]:
@@ -117,19 +133,43 @@ def compute_mechanism_map(
     target_width: int = DEFAULT_TARGET_WIDTH,
     floor_db: float = -50.0,
     min_valid_fraction: float = 0.5,
+    radiometry: str = DN_WITH_LUTS,
 ) -> MechanismMap | None:
     """Classify the whole scene onto a block-mean grid.
 
     Reads in row tiles and accumulates block sums of linear power, so peak memory
     is a tile rather than the 427 million pixel raster.  Returns ``None`` when the
     scene lacks the two polarisations this needs.
+
+    ``radiometry`` says how the pixels encode backscatter: detected amplitude
+    needing the LUTs, or provider sigma0 that already had them applied.  Only
+    the former needs ``calibration``.
     """
     from rasterio.windows import Window
 
-    if dataset.count < 2 or "VV" not in calibration or "VH" not in calibration:
+    from app.services.processing.radiometry import (
+        ground_sampling_metres,
+        linear_from_dataset_values,
+        uses_luts,
+    )
+
+    needs_luts = uses_luts(radiometry)
+    if dataset.count < 2:
+        return None
+    if needs_luts and ("VV" not in calibration or "VH" not in calibration):
         return None
 
-    block = max(1, dataset.width // max(1, target_width))
+    # Looks come from ground distance, not from pixel count. Deriving the block
+    # from raster width alone collapses to 1 on anything under target_width --
+    # a 2384 px subset got zero multi-looking and a speckle-dominated map,
+    # while the 25523 px frame it was cut from got 36 looks. Both are 10 m
+    # data and both need the same averaging to make the ratio mean anything.
+    # The width term is kept as a ceiling on output size; for a full frame the
+    # two agree exactly, so this changes nothing there.
+    sampling_m = ground_sampling_metres(dataset, fallback=10.0)
+    by_looks = max(1, int(round(TARGET_GROUND_SAMPLING_M / max(sampling_m, 0.1))))
+    by_width = max(1, dataset.width // max(1, target_width))
+    block = max(by_looks, by_width)
     out_width = dataset.width // block
     out_height = dataset.height // block
     if out_width < 2 or out_height < 2:
@@ -150,13 +190,19 @@ def compute_mechanism_map(
         # Zero DN is the GRD no-data marker; it must not enter the block mean.
         good = (raw[0] != 0) & (raw[1] != 0)
 
-        cal_vv = calibration["VV"].window(row_off, 0, rows, used_width)
-        cal_vh = calibration["VH"].window(row_off, 0, rows, used_width)
-        noise_vv = noise["VV"].window(row_off, 0, rows, used_width) if noise and "VV" in noise else None
-        noise_vh = noise["VH"].window(row_off, 0, rows, used_width) if noise and "VH" in noise else None
+        if needs_luts:
+            cal_vv = calibration["VV"].window(row_off, 0, rows, used_width)
+            cal_vh = calibration["VH"].window(row_off, 0, rows, used_width)
+            noise_vv = noise["VV"].window(row_off, 0, rows, used_width) if noise and "VV" in noise else None
+            noise_vh = noise["VH"].window(row_off, 0, rows, used_width) if noise and "VH" in noise else None
 
-        vv_lin = np.power(10.0, dn_to_sigma0_db(raw[0], cal_vv, floor_db, noise_vv) / 10.0)
-        vh_lin = np.power(10.0, dn_to_sigma0_db(raw[1], cal_vh, floor_db, noise_vh) / 10.0)
+            vv_lin = np.power(10.0, dn_to_sigma0_db(raw[0], cal_vv, floor_db, noise_vv) / 10.0)
+            vh_lin = np.power(10.0, dn_to_sigma0_db(raw[1], cal_vh, floor_db, noise_vh) / 10.0)
+        else:
+            # Already sigma0 in linear power; the block means below are exactly
+            # the multi-look the LUT branch arrives at by a longer route.
+            vv_lin = linear_from_dataset_values(raw[0])
+            vh_lin = linear_from_dataset_values(raw[1])
         vv_lin = np.where(good, vv_lin, 0.0)
         vh_lin = np.where(good, vh_lin, 0.0)
 
@@ -202,10 +248,14 @@ def compute_mechanism_map(
     return MechanismMap(
         labels=labels,
         block_factor=block,
-        # IW GRDH ships at 10 m pixel spacing.
-        ground_sampling_m=float(block * 10),
+        # Measured from the transform where there is one. A GRD carries no CRS,
+        # so that falls back to the 10 m an IW GRDH ships at -- but an
+        # orthorectified subset can be requested at any resolution, and
+        # assuming 10 m for one of those mislabels every distance on the map.
+        ground_sampling_m=float(block * ground_sampling_metres(dataset, fallback=10.0)),
         looks=int(block * block),
         valid_fraction=valid_fraction,
+        geometry="map" if getattr(dataset, "crs", None) else "radar",
     )
 
 
@@ -331,7 +381,11 @@ def render_mechanism_png(
     )
     detail = (
         f"{mechanism_map.ground_sampling_m:.0f} m sampling, {mechanism_map.looks} looks, "
-        f"radar geometry (no CRS - not map-projected)."
+        + (
+            "map-projected."
+            if mechanism_map.geometry == "map"
+            else "radar geometry (no CRS - not map-projected)."
+        )
     )
     if scene_name:
         detail = f"{scene_name[:60]} - {detail}"
@@ -357,7 +411,7 @@ def map_payload(mechanism_map: MechanismMap) -> dict[str, Any]:
         "ground_sampling_m": mechanism_map.ground_sampling_m,
         "looks": mechanism_map.looks,
         "valid_fraction": round(mechanism_map.valid_fraction, 4),
-        "geometry": "radar",
+        "geometry": mechanism_map.geometry,
         "is_map_projected": False,
         "aligns_with": "scene overview built from the same VRT",
         "legend": [

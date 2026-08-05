@@ -1,6 +1,7 @@
 import logging
 import zipfile
 import xml.etree.ElementTree as ET
+from xml.sax.saxutils import escape
 # pyrefly: ignore [missing-import]
 from fastapi import UploadFile, HTTPException
 import io
@@ -201,17 +202,29 @@ def _build_vrt_local(tiff_paths: list[str]) -> str:
     ref_w, ref_h, ref_dt = None, None, None
     vrt_dt = None
     source_band_counts: list[int] = []
-    
+    ref_crs_wkt: str | None = None
+    ref_transform = None
+
     for i, tiff in enumerate(tiff_paths):
         try:
             with rasterio.open(tiff) as src:
                 w, h = src.width, src.height
                 dt = src.dtypes[0]
                 source_band_counts.append(src.count)
-                
+
                 if i == 0:
                     ref_w, ref_h, ref_dt = w, h, dt
                     vrt_dt = dtype_map.get(dt, 'Float32')
+                    # A GRD measurement band has no CRS, so this stays absent
+                    # for every SAFE upload. An orthorectified provider subset
+                    # does have one, and dropping it here would throw away the
+                    # only georeferencing the scene will ever have.
+                    if src.crs is not None:
+                        try:
+                            ref_crs_wkt = src.crs.to_wkt()
+                            ref_transform = src.transform
+                        except Exception:
+                            ref_crs_wkt, ref_transform = None, None
                 else:
                     if w != ref_w or h != ref_h:
                         raise HTTPException(status_code=400, detail=f"Dimension mismatch in uploaded files. File {os.path.basename(tiff)} is {w}x{h}, but expected {ref_w}x{ref_h}.")
@@ -230,6 +243,13 @@ def _build_vrt_local(tiff_paths: list[str]) -> str:
         source_specs = [(tiff, 1) for tiff in tiff_paths]
 
     vrt_xml = f'<VRTDataset rasterXSize="{ref_w}" rasterYSize="{ref_h}">\n'
+    if ref_crs_wkt and ref_transform is not None:
+        # GDAL GeoTransform order: originX, pixelWidth, rowRotation,
+        # originY, columnRotation, pixelHeight.
+        gt = (ref_transform.c, ref_transform.a, ref_transform.b,
+              ref_transform.f, ref_transform.d, ref_transform.e)
+        vrt_xml += f'  <SRS>{escape(ref_crs_wkt)}</SRS>\n'
+        vrt_xml += '  <GeoTransform>' + ', '.join(f'{value!r}' for value in gt) + '</GeoTransform>\n'
     for i, (tiff, source_band) in enumerate(source_specs, 1):
         vrt_xml += f'''  <VRTRasterBand dataType="{vrt_dt}" band="{i}">
     <SimpleSource>

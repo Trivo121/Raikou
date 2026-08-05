@@ -87,6 +87,22 @@ class CopernicusProduct:
     online: bool
     size_bytes: int | None
     footprint: dict[str, Any] | None
+    # Acquisition geometry and identity. A full-frame scene reads all of this
+    # back out of manifest.safe at extract_metadata; a subset has no manifest,
+    # so the catalogue record is the only place it can come from -- and it is
+    # the authoritative one, being the same row the user picked from.
+    sensing_end: datetime | None = None
+    platform: str | None = None
+    instrument_mode: str | None = None
+    orbit_direction: str | None = None
+    relative_orbit: int | None = None
+    absolute_orbit: int | None = None
+    cycle_number: int | None = None
+    slice_number: int | None = None
+    total_slices: int | None = None
+    datatake_id: int | None = None
+    timeliness: str | None = None
+    processing_level: str | None = None
 
     def as_dict(self) -> dict[str, Any]:
         return {
@@ -98,7 +114,64 @@ class CopernicusProduct:
             "online": self.online,
             "size_bytes": self.size_bytes,
             "footprint": self.footprint,
+            "sensing_end": self.sensing_end.isoformat() if self.sensing_end else None,
+            "platform": self.platform,
+            "instrument_mode": self.instrument_mode,
+            "orbit_direction": self.orbit_direction,
+            "relative_orbit": self.relative_orbit,
+            "absolute_orbit": self.absolute_orbit,
+            "cycle_number": self.cycle_number,
+            "slice_number": self.slice_number,
+            "total_slices": self.total_slices,
+            "datatake_id": self.datatake_id,
+            "timeliness": self.timeliness,
+            "processing_level": self.processing_level,
         }
+
+    def polarizations(self) -> list[str]:
+        """``VV&VH`` as the list shape the rest of the app already speaks."""
+        text = str(self.polarisation_channels or "")
+        found = [pol for pol in ("VV", "VH", "HH", "HV") if pol in text.upper()]
+        return found or ["Unknown"]
+
+    def scene_metadata(self, *, subset: dict[str, Any] | None = None) -> dict[str, Any]:
+        """The metadata block a subset scene carries in place of a manifest.
+
+        ``_generic_raster_metadata`` would otherwise label this scene
+        ``sensor: "GeoTIFF"``, ``polarization: ["Unknown"]`` and no acquisition
+        date, which is exactly the bare scene a provider fetch should never
+        produce. Everything below is read from the catalogue entry for the
+        product the user selected, so it describes that acquisition and not a
+        guess made from the pixels.
+        """
+        payload: dict[str, Any] = {
+            "scene_name": self.name.removesuffix(".SAFE"),
+            "sensor": self.platform or "Sentinel-1",
+            "instrument_mode": self.instrument_mode,
+            "product_type": self.product_type,
+            "processing_level": self.processing_level,
+            "polarization": self.polarizations(),
+            "acquisition_date": self.sensing_start.isoformat() if self.sensing_start else None,
+            "acquisition_end": self.sensing_end.isoformat() if self.sensing_end else None,
+            "orbit_direction": self.orbit_direction,
+            "relative_orbit": self.relative_orbit,
+            "absolute_orbit": self.absolute_orbit,
+            "cycle_number": self.cycle_number,
+            "slice_number": self.slice_number,
+            "total_slices": self.total_slices,
+            "datatake_id": self.datatake_id,
+            "timeliness": self.timeliness,
+            "provider": "copernicus",
+            "provider_product_id": self.product_id,
+            "provider_product_name": self.name,
+            # The whole frame this subset was cut from, kept so the scene can
+            # still say what it is part of.
+            "frame_footprint": self.footprint,
+            "frame_size_bytes": self.size_bytes,
+        }
+        if subset:
+            payload.update(subset)
+        return {key: value for key, value in payload.items() if value is not None}
 
 
 @dataclass(frozen=True, slots=True)
@@ -296,7 +369,29 @@ def _product_from_odata(product: dict[str, Any]) -> CopernicusProduct | None:
     sensing_start = _parse_timestamp(
         content_date.get("Start") if isinstance(content_date, dict) else None
     )
+    sensing_end = _parse_timestamp(
+        content_date.get("End") if isinstance(content_date, dict) else None
+    )
     footprint = product.get("GeoFootprint")
+
+    def _text(key: str) -> str | None:
+        value = attributes.get(key)
+        return str(value) if value not in (None, "") else None
+
+    def _int(key: str) -> int | None:
+        value = attributes.get(key)
+        if isinstance(value, bool) or value in (None, ""):
+            return None
+        try:
+            return int(value)
+        except (TypeError, ValueError):
+            return None
+
+    # 'D' in platformSerialIdentifier means Sentinel-1D. Composed rather than
+    # taken from platformShortName, which is only ever the bare 'SENTINEL-1'.
+    serial = _text("platformSerialIdentifier")
+    platform = f"S1{serial.strip().upper()}" if serial else None
+
     return CopernicusProduct(
         product_id=product_id,
         name=name,
@@ -313,6 +408,18 @@ def _product_from_odata(product: dict[str, Any]) -> CopernicusProduct | None:
         online=product.get("Online") is not False,
         size_bytes=size,
         footprint=footprint if isinstance(footprint, dict) else None,
+        sensing_end=sensing_end,
+        platform=platform,
+        instrument_mode=_text("operationalMode"),
+        orbit_direction=_text("orbitDirection"),
+        relative_orbit=_int("relativeOrbitNumber"),
+        absolute_orbit=_int("orbitNumber"),
+        cycle_number=_int("cycleNumber"),
+        slice_number=_int("sliceNumber"),
+        total_slices=_int("totalSlices"),
+        datatake_id=_int("datatakeID"),
+        timeliness=_text("timeliness"),
+        processing_level=_text("processingLevel"),
     )
 
 

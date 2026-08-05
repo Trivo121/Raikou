@@ -238,6 +238,20 @@ class Settings(BaseSettings):
     # In-attempt HTTP Range resumes. Worker scratch is wiped between attempts,
     # so this cannot span them; the task retry budget covers that.
     COPERNICUS_DOWNLOAD_MAX_RESUMES: int = Field(default=5, ge=0, le=50)
+    # Sentinel Hub is a different service from the product download: it draws
+    # on the processing-unit quota rather than the data quota, and it is what
+    # returns an area-of-interest subset instead of a whole 250x170 km frame.
+    COPERNICUS_PROCESS_URL: str = "https://sh.dataspace.copernicus.eu/api/v1/process"
+    # 10 m is the native IW GRDH spacing and is deliberately fixed rather than
+    # scaled to fit a larger area. reBEN land cover is trained on 120 px at
+    # 10 m, so a coarser subset would hand the classifier a 4.8 km window where
+    # it expects 1.2 km and get confident nonsense back rather than a weaker
+    # answer; the scattering windows inherit the same geometry.
+    COPERNICUS_SUBSET_METRES_PER_PIXEL: float = Field(default=10.0, gt=0, le=100)
+    # Per-request ceiling on the Process API. With the pixel size pinned above,
+    # this is what caps an area of interest at roughly 25 x 25 km.
+    COPERNICUS_SUBSET_MAX_PIXELS: int = Field(default=2500, ge=256, le=2500)
+    COPERNICUS_SUBSET_TIMEOUT_SECONDS: float = Field(default=300.0, gt=0, le=900)
     COPERNICUS_MAX_SEARCH_RESULTS: int = Field(default=50, ge=1, le=200)
     COPERNICUS_MAX_SEARCH_DAYS: int = Field(default=90, ge=1, le=3660)
     COPERNICUS_MAX_AOI_SQ_KM: float = Field(default=250_000.0, gt=0, le=10_000_000)
