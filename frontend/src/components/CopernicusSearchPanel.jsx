@@ -40,11 +40,17 @@ function formatSensed(value) {
   return new Intl.DateTimeFormat(undefined, { dateStyle: 'medium', timeStyle: 'short' }).format(date);
 }
 
+function spanKm(bbox) {
+  const midLatitude = ((bbox.south + bbox.north) / 2) * (Math.PI / 180);
+  return {
+    width: Math.abs(bbox.east - bbox.west) * KM_PER_DEGREE * Math.cos(midLatitude),
+    height: Math.abs(bbox.north - bbox.south) * KM_PER_DEGREE,
+  };
+}
+
 function approximateAreaSqKm(bbox) {
   if (!bbox) return 0;
-  const midLatitude = ((bbox.south + bbox.north) / 2) * (Math.PI / 180);
-  const width = Math.abs(bbox.east - bbox.west) * KM_PER_DEGREE * Math.cos(midLatitude);
-  const height = Math.abs(bbox.north - bbox.south) * KM_PER_DEGREE;
+  const { width, height } = spanKm(bbox);
   return width * height;
 }
 
@@ -53,6 +59,27 @@ function daysBetween(start, end) {
   const to = new Date(`${end}T00:00:00Z`).getTime();
   if (!Number.isFinite(from) || !Number.isFinite(to)) return null;
   return Math.round((to - from) / 86_400_000);
+}
+
+function ModeChip({ label, detail, selected, disabled, onSelect }) {
+  return (
+    <button
+      type="button"
+      onClick={onSelect}
+      disabled={disabled}
+      aria-pressed={selected}
+      className={`flex-1 rounded-lg border px-3 py-2 text-left transition disabled:cursor-not-allowed disabled:opacity-40 ${
+        selected
+          ? 'border-sky-400/50 bg-sky-400/10'
+          : 'border-white/[0.1] hover:bg-white/[0.04]'
+      }`}
+    >
+      <span className={`block text-[11px] font-semibold ${selected ? 'text-sky-200' : 'text-zinc-300'}`}>
+        {label}
+      </span>
+      <span className="mt-0.5 block text-[10px] leading-4 text-zinc-500">{detail}</span>
+    </button>
+  );
 }
 
 function Notice({ tone = 'info', icon: Icon = Info, children }) {
@@ -83,6 +110,9 @@ export default function CopernicusSearchPanel({ api, scene, onStarted, onUseUplo
   const [startDate, setStartDate] = useState(range.start);
   const [endDate, setEndDate] = useState(range.end);
   const [selectedId, setSelectedId] = useState(null);
+  // Subset by default: it is what almost everyone wants from a drawn box, and
+  // it is forty times smaller and map-projected.
+  const [mode, setMode] = useState('aoi_subset');
 
   // One id per product choice, stable across retries of that same choice, so a
   // lost response replays the original acquisition rather than starting a
@@ -116,6 +146,20 @@ export default function CopernicusSearchPanel({ api, scene, onStarted, onUseUplo
   const maxArea = provider?.max_aoi_sq_km ?? 250_000;
   const maxDays = provider?.max_search_days ?? 90;
 
+  // A subset is rendered at native 10 m, so the provider's per-request pixel
+  // ceiling is a hard limit on how wide the box may be. Checked here as well as
+  // server-side so an oversized area is visible while it is being drawn rather
+  // than only after picking a scene.
+  const subsetMaxKm = ((provider?.subset_max_pixels ?? 2500)
+    * (provider?.subset_metres_per_pixel ?? 10)) / 1000;
+  const span = bbox ? spanKm(bbox) : null;
+  const tooWideForSubset = Boolean(span)
+    && (span.width > subsetMaxKm || span.height > subsetMaxKm);
+  // Falling back rather than blocking: the whole frame is a genuine answer to
+  // "this area is too big to cut out", and it is one click either way.
+  const effectiveMode = mode === 'aoi_subset' && tooWideForSubset ? 'full_frame' : mode;
+  const isSubset = effectiveMode === 'aoi_subset';
+
   const areaTooLarge = Boolean(bbox) && areaSqKm > maxArea;
   const spanTooLong = spanDays !== null && spanDays > maxDays;
   const rangeInverted = spanDays !== null && spanDays < 0;
@@ -145,6 +189,13 @@ export default function CopernicusSearchPanel({ api, scene, onStarted, onUseUplo
       product_id: selected.product_id,
       product_name: selected.name,
       client_request_id: requestIdRef.current.value,
+      mode: effectiveMode,
+      // Sent explicitly rather than inferred server-side from the search box.
+      // They are usually the same box, but panning between searching and
+      // choosing would otherwise deliver an area other than the one on screen.
+      ...(isSubset && bbox
+        ? { aoi: { west: bbox.west, south: bbox.south, east: bbox.east, north: bbox.north } }
+        : {}),
     });
   };
 
@@ -282,9 +333,11 @@ export default function CopernicusSearchPanel({ api, scene, onStarted, onUseUplo
             <>
               <div className="mt-2">
                 <Notice>
-                  Sentinel-1 ships whole ~250×170 km frames. Each result{' '}
-                  <span className="font-semibold text-zinc-300">covers</span> your area — it is not
-                  cropped to it.
+                  Sentinel-1 ships whole ~250×170 km frames, so each result{' '}
+                  <span className="font-semibold text-zinc-300">covers</span> your area rather than
+                  matching it. {isSubset
+                    ? 'Your area is then cut out of the scene you pick, at full 10 m resolution.'
+                    : 'The whole frame will be downloaded.'}
                 </Notice>
               </div>
               <ul className="mt-3 space-y-2">
@@ -333,8 +386,36 @@ export default function CopernicusSearchPanel({ api, scene, onStarted, onUseUplo
           <p className="text-[11px] font-semibold uppercase tracking-[0.1em] text-zinc-500">Selected scene</p>
           <p className="mt-1.5 break-all text-xs font-medium text-zinc-200">{selected.name}</p>
           <p className="mt-1 text-[11px] text-zinc-500">
-            {formatBytes(selected.size_bytes)} · downloads on the server, so you can close this tab.
+            {isSubset && span
+              ? <>Your {span.width.toFixed(0)} x {span.height.toFixed(0)} km area at 10 m, cut from this scene. Renders on the server, so you can close this tab.</>
+              : <>{formatBytes(selected.size_bytes)}, the whole frame · downloads on the server, so you can close this tab.</>}
           </p>
+
+          <fieldset className="mt-3">
+            <legend className="sr-only">What to fetch</legend>
+            <div className="flex flex-wrap gap-1.5">
+              <ModeChip
+                label="Just my area"
+                detail={span ? `~${span.width.toFixed(0)} x ${span.height.toFixed(0)} km · 10 m · map-projected` : 'Draw an area first'}
+                selected={isSubset}
+                disabled={tooWideForSubset}
+                onSelect={() => setMode('aoi_subset')}
+              />
+              <ModeChip
+                label="Whole frame"
+                detail={`${formatBytes(selected.size_bytes)} · ~250 x 170 km · radar geometry`}
+                selected={!isSubset}
+                onSelect={() => setMode('full_frame')}
+              />
+            </div>
+            {tooWideForSubset && (
+              <p className="mt-2 text-[11px] text-amber-300/80">
+                This area is {span.width.toFixed(0)} x {span.height.toFixed(0)} km. Cutting one out
+                keeps the native 10 m resolution, which caps it at {subsetMaxKm.toFixed(0)} km a side,
+                so the whole frame is being fetched instead. Draw a smaller area to cut just that out.
+              </p>
+            )}
+          </fieldset>
           {start.error && (
             <div className="mt-3"><Notice tone="error" icon={CircleAlert}>{start.error.message}</Notice></div>
           )}

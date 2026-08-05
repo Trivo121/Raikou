@@ -75,7 +75,12 @@ class AcquisitionProviderRead(BaseModel):
     # than clipping one. Sentinel-1 GRD ships as whole ~250x170 km frames.
     product_type: str
     polarisation_channels: str
-    aoi_is_crop: bool = False
+    # True now that a subset is the default: the drawn area really is cut out.
+    aoi_is_crop: bool = True
+    # The subset ceiling, so the UI can warn while the box is being drawn
+    # rather than only after a scene is picked and the request is refused.
+    subset_max_pixels: int
+    subset_metres_per_pixel: float
 
 
 class AcquisitionProvidersRead(BaseModel):

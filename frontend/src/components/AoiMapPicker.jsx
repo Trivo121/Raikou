@@ -581,7 +581,9 @@ export default function AoiMapPicker({ value, onChange, footprints, selectedId, 
           {span && (
             <p className="mt-2 text-[11px] text-zinc-500">
               Roughly <span className="font-mono text-zinc-300">{span.width.toFixed(0)} x {span.height.toFixed(0)} km</span>
-              {' '}&middot; a Sentinel-1 IW frame covers about 250 x 170 km, and this box selects frames that overlap it rather than cropping them.
+              {' '}&middot; a Sentinel-1 IW frame covers about 250 x 170 km, so this box picks
+              which frame to use. That area is then cut out of it at full 10 m resolution,
+              up to 25 km a side.
             </p>
           )}
         </div>

@@ -136,10 +136,12 @@ async def list_providers(
             max_aoi_sq_km=settings.COPERNICUS_MAX_AOI_SQ_KM,
             product_type=copernicus.REQUIRED_PRODUCT_TYPE,
             polarisation_channels=copernicus.REQUIRED_POLARISATION_CHANNELS,
-            # Sentinel-1 GRD ships as whole ~250x170 km frames and there is no
-            # provider API returning "just my AOI" as a SAFE product. Cropping
-            # would destroy the SAFE layout the pipeline reads.
-            aoi_is_crop=False,
+            # A GRD download is a whole ~250x170 km frame, but the default is
+            # no longer a download: Sentinel Hub renders the drawn box out of
+            # that same acquisition, so the area really is cut out.
+            aoi_is_crop=True,
+            subset_max_pixels=settings.COPERNICUS_SUBSET_MAX_PIXELS,
+            subset_metres_per_pixel=settings.COPERNICUS_SUBSET_METRES_PER_PIXEL,
         )
     )
 
