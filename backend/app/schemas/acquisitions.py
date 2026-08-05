@@ -11,11 +11,47 @@ from enum import Enum
 from typing import Any
 from uuid import UUID
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 
 class AcquisitionProvider(str, Enum):
     COPERNICUS = "copernicus"
+
+
+class AcquisitionMode(str, Enum):
+    """What shape of data to fetch for the drawn area.
+
+    ``aoi_subset`` renders just the box, orthorectified and already calibrated.
+    ``full_frame`` downloads the whole SAFE product the box falls inside.
+    """
+
+    AOI_SUBSET = "aoi_subset"
+    FULL_FRAME = "full_frame"
+
+
+class BoundingBoxModel(BaseModel):
+    """The area to render, as four validated floats.
+
+    Same shape as the search box and validated the same way, but kept separate
+    on purpose: the search box is where a user looked, this is what they want
+    cut out, and conflating them would let a pan between the two silently move
+    the delivered area.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    west: float = Field(ge=-180.0, le=180.0)
+    south: float = Field(ge=-90.0, le=90.0)
+    east: float = Field(ge=-180.0, le=180.0)
+    north: float = Field(ge=-90.0, le=90.0)
+
+    @model_validator(mode="after")
+    def ordered(self) -> "BoundingBoxModel":
+        if self.west >= self.east:
+            raise ValueError("west must be less than east; an antimeridian box is not supported.")
+        if self.south >= self.north:
+            raise ValueError("south must be less than north.")
+        return self
 
 
 class SceneAcquisitionStatus(str, Enum):
@@ -97,6 +133,20 @@ class AcquisitionCreateRequest(BaseModel):
     # re-fetches from the provider.
     product_name: str = Field(min_length=1, max_length=512)
     client_request_id: str | None = Field(default=None, min_length=8, max_length=128)
+    # Subset by default: it is what almost everyone wants, and it is 40x
+    # smaller and map-projected. A whole frame stays available for work that
+    # needs the full swath or the ~33k patches it tiles into.
+    mode: AcquisitionMode = AcquisitionMode.AOI_SUBSET
+    # Required for a subset and ignored otherwise. Not defaulted to the search
+    # box: the user may have panned since, and silently fetching somewhere
+    # other than what is on screen is worse than refusing.
+    aoi: BoundingBoxModel | None = None
+
+    @model_validator(mode="after")
+    def subset_needs_its_box(self) -> "AcquisitionCreateRequest":
+        if self.mode is AcquisitionMode.AOI_SUBSET and self.aoi is None:
+            raise ValueError("An area-of-interest subset needs the area to render.")
+        return self
 
 
 class SceneAcquisitionRead(BaseModel):

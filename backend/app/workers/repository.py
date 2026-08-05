@@ -527,6 +527,7 @@ class WorkerRepository:
         size_bytes: int,
         checksum_sha256: str | None,
         artifact_id: str | UUID,
+        processing_units: float | None = None,
     ) -> None:
         with self.transaction() as connection, connection.cursor() as cursor:
             cursor.execute(
@@ -535,11 +536,12 @@ class WorkerRepository:
                 set status = 'downloaded'::public.scene_acquisition_status,
                     storage_bucket = %s, storage_key = %s, downloaded_size_bytes = %s,
                     checksum_sha256 = %s, artifact_id = %s, downloaded_at = now(),
+                    processing_units = %s,
                     failure_code = null, failure_detail = null
                 where id = %s and owner_id = %s
                 """,
                 (storage_bucket, storage_key, size_bytes, checksum_sha256, artifact_id,
-                 acquisition_id, owner_id),
+                 processing_units, acquisition_id, owner_id),
             )
 
     def mark_acquisition_failed(

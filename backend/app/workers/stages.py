@@ -35,6 +35,7 @@ from app.services.ingestion.calibration import load_calibration_luts, load_noise
 from app.services.ingestion.file_ingestion import _build_vrt, _build_vrt_local, extract_metadata
 from app.services.models.sarclip_encoder import EncodedPatch, ProgressUpdate, SARCLIPEncoder, encode_patch_stream
 from app.services.processing.patch_pipeline import PATCH_SIZE, _build_channels, extract_and_preprocess_patches
+from app.services.processing.radiometry import SIGMA0_LINEAR
 from app.services.processing.scene_record import build_scene_record
 from app.services.storage.object_store import ObjectNotFoundError, ObjectStorage, get_object_storage
 from app.services.uploads.validation import (
@@ -368,13 +369,23 @@ class M3Pipeline:
 
     @staticmethod
     def _generic_raster_metadata(rasters: list[Path], artifacts: list[dict[str, Any]]) -> dict[str, Any]:
-        metadata: dict[str, Any] = {
+        # A provider subset has no manifest to read, but the catalogue entry it
+        # came from was recorded on the artifact when it was fetched. Preferring
+        # that is the difference between a scene that knows its platform, orbit
+        # and acquisition time and one labelled "GeoTIFF" with no date -- and
+        # there is nothing in the pixels to recover it from afterwards.
+        for artifact in artifacts:
+            metadata = artifact.get("metadata")
+            if isinstance(metadata, dict):
+                recorded = metadata.get("scene_metadata")
+                if isinstance(recorded, dict) and recorded:
+                    return dict(recorded)
+        return {
             "scene_name": rasters[0].stem,
             "polarization": ["Unknown"],
             "sensor": "GeoTIFF",
             "acquisition_date": None,
         }
-        return metadata
 
     @staticmethod
     def _acquisition_key(task: dict[str, Any], acquisition: dict[str, Any]) -> str:
@@ -444,6 +455,9 @@ class M3Pipeline:
                 "COPERNICUS_PRODUCT_OFFLINE",
                 "This product is in the long-term archive and must be ordered before download.",
             )
+
+        if str(acquisition.get("mode") or "full_frame") == "aoi_subset":
+            return self._run_subset_fetch(task, acquisition)
 
         expected_size = int(acquisition["expected_size_bytes"])
         key = self._acquisition_key(task, acquisition)
@@ -535,6 +549,124 @@ class M3Pipeline:
             task, acquisition, key=key, size_bytes=int(object_info.size_bytes),
             checksum=checksum, reused=False, layout=layout, downloaded_bytes=written,
         )
+
+    def _run_subset_fetch(self, task: dict[str, Any], acquisition: dict[str, Any]) -> dict[str, Any]:
+        """Render just the drawn box and register it as two source rasters.
+
+        Two files rather than one two-band file on purpose: ``_build_vrt_local``
+        exposes only band 1 of a single source unless it has three or more
+        bands, so a two-band GeoTIFF would silently lose VH and leave every
+        dual-pol consumer downstream seeing a one-band scene.
+        """
+        from app.services.acquisitions import subset as subset_service
+
+        bbox = copernicus.BoundingBox(
+            west=float(acquisition["subset_west"]),
+            south=float(acquisition["subset_south"]),
+            east=float(acquisition["subset_east"]),
+            north=float(acquisition["subset_north"]),
+        )
+        try:
+            product = copernicus.get_product(str(acquisition["product_id"]))
+        except copernicus.CopernicusProductNotFoundError as exc:
+            raise UserFacingTaskError("COPERNICUS_PRODUCT_NOT_FOUND", str(exc)) from exc
+        except copernicus.CopernicusAuthError as exc:
+            raise UserFacingTaskError("COPERNICUS_AUTH_FAILED", str(exc)) from exc
+        except copernicus.CopernicusError as exc:
+            raise RetryableTaskError(str(exc)) from exc
+
+        self.repository.mark_acquisition_downloading(acquisition["id"], task["owner_id"])
+        heartbeat = _FetchHeartbeat(
+            self.repository, task, worker_id=str(task.get("locked_by") or ""),
+        )
+        scratch = self._workdir(task) / "subset"
+        heartbeat.start()
+        try:
+            result = subset_service.fetch_subset(product, bbox, scratch)
+        except subset_service.SubsetTooLargeError as exc:
+            raise UserFacingTaskError("SUBSET_AREA_TOO_LARGE", str(exc)) from exc
+        except copernicus.CopernicusAuthError as exc:
+            raise UserFacingTaskError("COPERNICUS_AUTH_FAILED", str(exc)) from exc
+        except copernicus.CopernicusError as exc:
+            raise RetryableTaskError(str(exc)) from exc
+        finally:
+            heartbeat.stop()
+
+        scene_metadata = product.scene_metadata(subset={
+            "radiometry": SIGMA0_LINEAR,
+            "coverage": "area_of_interest_subset",
+            "crs": result["crs"],
+            "ground_sampling_m": result["metres_per_pixel"],
+            "width_px": result["width_px"],
+            "height_px": result["height_px"],
+            "subset_bbox": {
+                "west": bbox.west, "south": bbox.south,
+                "east": bbox.east, "north": bbox.north,
+            },
+        })
+
+        artifact_ids: list[str] = []
+        object_keys: list[str] = []
+        for path in result["rasters"]:
+            polarisation = "vv" if "vv" in path.name.lower() else "vh"
+            key = (
+                f"acquisitions/{task['owner_id']}/{task['project_id']}/{task['scene_id']}/"
+                f"{acquisition['id']}/{path.name}"
+            )
+            try:
+                info = self.storage.upload_file(
+                    key, str(path), "image/tiff", {"logical-key": f"source-copernicus-subset-{polarisation}"}
+                )
+            except Exception as exc:
+                raise RetryableTaskError("Unable to persist the subset to object storage.") from exc
+            artifact = self.repository.upsert_artifact(
+                task,
+                kind="source_raster",
+                logical_key=f"source:copernicus-subset-{polarisation}:v1",
+                storage_bucket=self.bucket,
+                storage_key=key,
+                content_type="image/tiff",
+                size_bytes=int(info.size_bytes),
+                checksum_sha256=self._sha256_file(path),
+                metadata={
+                    "provider": "copernicus",
+                    "polarisation": polarisation.upper(),
+                    "scene_acquisition_id": str(acquisition["id"]),
+                    # Read back by _source_radiometry: these pixels are sigma0
+                    # already, so the LUT path must not run over them.
+                    "radiometry": SIGMA0_LINEAR,
+                    # Replaces _generic_raster_metadata, which would otherwise
+                    # label this scene sensor "GeoTIFF" with no acquisition date.
+                    "scene_metadata": scene_metadata,
+                    "aoi_is_crop": True,
+                },
+            )
+            artifact_ids.append(str(artifact["id"]))
+            object_keys.append(key)
+
+        # Band 1 is VV, and _materialize_sources hands the rasters to the VRT in
+        # name order, so the VV artifact is the scene's nominal source. The
+        # acquisition row records that same object: it wants one key, and
+        # scene_acquisitions_downloaded_fields_ck requires a non-null one.
+        self.repository.mark_acquisition_downloaded(
+            acquisition["id"], task["owner_id"],
+            storage_bucket=self.bucket,
+            storage_key=object_keys[0],
+            size_bytes=int(result["bytes"]),
+            checksum_sha256=None,
+            artifact_id=artifact_ids[0],
+            processing_units=result.get("processing_units"),
+        )
+        self.repository.set_scene_source_artifact(task, artifact_ids[0])
+        return {
+            "acquisition_id": str(acquisition["id"]),
+            "mode": "aoi_subset",
+            "artifact_ids": artifact_ids,
+            "bytes": int(result["bytes"]),
+            "pixels": f"{result['width_px']}x{result['height_px']}",
+            "metres_per_pixel": result["metres_per_pixel"],
+            "processing_units": result.get("processing_units"),
+        }
 
     def _existing_object(self, key: str) -> Any:
         try:

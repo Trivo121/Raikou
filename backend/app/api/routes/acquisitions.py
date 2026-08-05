@@ -24,6 +24,7 @@ from app.api.deps import (
 from app.core.config import settings
 from app.schemas.acquisitions import (
     AcquisitionCreateRequest,
+    AcquisitionMode,
     AcquisitionProductRead,
     AcquisitionProviderRead,
     AcquisitionProvidersRead,
@@ -33,6 +34,7 @@ from app.schemas.acquisitions import (
     SceneAcquisitionRead,
 )
 from app.services.acquisitions import copernicus
+from app.services.acquisitions import subset as subset_service
 from app.services.database import get_supabase
 from app.services.processing.scene_geography import bbox_extent_km
 
@@ -300,6 +302,32 @@ async def start_acquisition(
         _raise_for_provider_error(exc)
     _assert_product_is_usable(product, payload.product_name)
 
+    # Sizing the subset is also what enforces the area cap, and it happens
+    # before anything durable is written: a box too large to render at native
+    # resolution is refused here rather than discovered by the worker minutes
+    # later, with the acquisition already queued and the scene already moved
+    # out of draft.
+    subset_fields: dict[str, Any] = {"mode": payload.mode.value}
+    if payload.mode is AcquisitionMode.AOI_SUBSET:
+        aoi = payload.aoi
+        try:
+            plan = subset_service.plan_subset(
+                copernicus.BoundingBox(
+                    west=aoi.west, south=aoi.south, east=aoi.east, north=aoi.north
+                )
+            )
+        except subset_service.SubsetTooLargeError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+        subset_fields.update({
+            "subset_west": aoi.west,
+            "subset_south": aoi.south,
+            "subset_east": aoi.east,
+            "subset_north": aoi.north,
+            "subset_width_px": plan.width_px,
+            "subset_height_px": plan.height_px,
+            "subset_metres_per_pixel": plan.metres_per_pixel,
+        })
+
     response = await _execute(
         lambda: get_supabase()
         .rpc(
@@ -320,6 +348,7 @@ async def start_acquisition(
                     "online": product.online,
                     "expected_size_bytes": product.size_bytes,
                     "footprint": product.footprint,
+                    **subset_fields,
                 },
             },
         )
