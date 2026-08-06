@@ -77,3 +77,9 @@ SARVLM/
 
 # Supabase CLI local artifacts
 supabase/.temp/
+
+# Create React App output, from before the Vite migration. Vite writes to
+# dist/ (already ignored); a stale build/ was committed once and should not
+# come back.
+build/
+frontend/build/
