@@ -73,7 +73,7 @@ const BASE_STYLE = {
 const EMPTY = { type: 'FeatureCollection', features: [] };
 const CORNERS = ['sw', 'se', 'ne', 'nw'];
 
-function bboxFeature(bbox) {
+function bboxFeature(bbox, drawing = false) {
   if (!bbox) return EMPTY;
   const { west, south, east, north } = bbox;
   if (![west, south, east, north].every(Number.isFinite)) return EMPTY;
@@ -81,7 +81,10 @@ function bboxFeature(bbox) {
     type: 'FeatureCollection',
     features: [{
       type: 'Feature',
-      properties: {},
+      // Drives a heavier outline while the box is being dragged out. A 14%
+      // fill behind a 2px line is legible once it is sitting still, but not
+      // while you are looking for it to appear over a photograph.
+      properties: { drawing: drawing ? 1 : 0 },
       geometry: {
         type: 'Polygon',
         coordinates: [[[west, south], [east, south], [east, north], [west, north], [west, south]]],
@@ -208,11 +211,13 @@ export default function AoiMapPicker({ value, onChange, footprints, selectedId, 
     map.addControl(new AttributionControl({ compact: true }));
     map.addControl(new NavigationControl({ showCompass: false }), 'top-right');
 
-    const paint = (box) => {
+    const paint = (box, drawing = false) => {
       const aoi = map.getSource('aoi');
       const handles = map.getSource('aoi-handles');
-      if (aoi) aoi.setData(bboxFeature(box));
-      if (handles) handles.setData(handleFeatures(box));
+      if (aoi) aoi.setData(bboxFeature(box, drawing));
+      // Corner handles would sit under the cursor mid-drag and are meaningless
+      // until the box is committed, so they stay hidden while drawing.
+      if (handles) handles.setData(drawing ? EMPTY : handleFeatures(box));
     };
 
     map.on('load', () => {
@@ -248,7 +253,10 @@ export default function AoiMapPicker({ value, onChange, footprints, selectedId, 
         id: 'aoi-fill',
         type: 'fill',
         source: 'aoi',
-        paint: { 'fill-color': '#38bdf8', 'fill-opacity': 0.14 },
+        paint: {
+          'fill-color': '#38bdf8',
+          'fill-opacity': ['case', ['==', ['get', 'drawing'], 1], 0.28, 0.14],
+        },
       });
       // A dark casing under a bright line. Satellite imagery is a photograph:
       // any single colour disappears somewhere in it, over snow or sand or
@@ -258,13 +266,20 @@ export default function AoiMapPicker({ value, onChange, footprints, selectedId, 
         id: 'aoi-casing',
         type: 'line',
         source: 'aoi',
-        paint: { 'line-color': '#0b0b0e', 'line-width': 5, 'line-opacity': 0.75 },
+        paint: {
+          'line-color': '#0b0b0e',
+          'line-width': ['case', ['==', ['get', 'drawing'], 1], 7, 5],
+          'line-opacity': 0.75,
+        },
       });
       map.addLayer({
         id: 'aoi-line',
         type: 'line',
         source: 'aoi',
-        paint: { 'line-color': '#38bdf8', 'line-width': 2 },
+        paint: {
+          'line-color': ['case', ['==', ['get', 'drawing'], 1], '#7dd3fc', '#38bdf8'],
+          'line-width': ['case', ['==', ['get', 'drawing'], 1], 3.5, 2],
+        },
       });
 
       map.addSource('aoi-handles', { type: 'geojson', data: EMPTY });
@@ -316,9 +331,12 @@ export default function AoiMapPicker({ value, onChange, footprints, selectedId, 
 
     const handleDown = (event) => {
       if (!armedRef.current) return;
+      // Panning is already disabled by armDrawing. Disabling it here instead
+      // was too late: maplibre's pan handler engages on this same mousedown,
+      // so the map slid under the cursor while the box was drawn in geographic
+      // coordinates -- which reads as the box never appearing.
+      event.preventDefault?.();
       drawStartRef.current = event.lngLat;
-      // Otherwise the drag pans the map out from under the box being drawn.
-      map.dragPan.disable();
     };
     const handleMove = (event) => {
       if (dragCornerRef.current && valueRef.current) {
@@ -326,13 +344,14 @@ export default function AoiMapPicker({ value, onChange, footprints, selectedId, 
         return;
       }
       if (!drawStartRef.current) return;
-      paint(normalizeBox(drawStartRef.current, event.lngLat));
+      paint(normalizeBox(drawStartRef.current, event.lngLat), true);
     };
     const handleUp = (event) => {
       if (dragCornerRef.current) {
         const corner = dragCornerRef.current;
         dragCornerRef.current = null;
         map.dragPan.enable();
+        map.boxZoom.enable();
         map.getCanvas().style.cursor = '';
         if (valueRef.current) {
           const box = moveCorner(valueRef.current, corner, event.lngLat);
@@ -345,6 +364,7 @@ export default function AoiMapPicker({ value, onChange, footprints, selectedId, 
       if (!start) return;
       drawStartRef.current = null;
       map.dragPan.enable();
+      map.boxZoom.enable();
       armedRef.current = false;
       setArmed(false);
       map.getCanvas().style.cursor = '';
@@ -369,6 +389,7 @@ export default function AoiMapPicker({ value, onChange, footprints, selectedId, 
       drawStartRef.current = null;
       dragCornerRef.current = null;
       map.dragPan.enable();
+      map.boxZoom.enable();
       armedRef.current = false;
       setArmed(false);
       map.getCanvas().style.cursor = '';
@@ -456,7 +477,13 @@ export default function AoiMapPicker({ value, onChange, footprints, selectedId, 
     const map = mapRef.current;
     armedRef.current = true;
     setArmed(true);
-    if (map) map.getCanvas().style.cursor = 'crosshair';
+    if (map) {
+      // Off before the gesture starts, not during it. boxZoom shares the
+      // drag gesture and would fight the same mousedown.
+      map.dragPan.disable();
+      map.boxZoom.disable();
+      map.getCanvas().style.cursor = 'crosshair';
+    }
   };
 
   const clearArea = () => {
@@ -465,6 +492,11 @@ export default function AoiMapPicker({ value, onChange, footprints, selectedId, 
     setArmed(false);
     setDraft(null);
     if (map) {
+      // Clearing while armed but before drawing would otherwise leave panning
+      // disabled with nothing on screen to explain it -- the same dead-map
+      // state the window-level mouseup guard exists to prevent.
+      map.dragPan.enable();
+      map.boxZoom.enable();
       map.getCanvas().style.cursor = '';
       map.getSource('aoi')?.setData(EMPTY);
       map.getSource('aoi-handles')?.setData(EMPTY);
