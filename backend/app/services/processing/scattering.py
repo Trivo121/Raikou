@@ -104,15 +104,25 @@ class ScatteringThresholds:
     urban_min_vv_db: float
     urban_max_ratio_db: float
     volume_min_rvi: float
+    # "fitted" when this scene's own distribution supported a split, "fallback"
+    # when it did not and fixed levels were used instead. Carried so a reader
+    # is told which of the two they are looking at, rather than both being
+    # presented with the same confidence.
+    source: str = "fitted"
+    degenerate_reason: str | None = None
 
-    def as_dict(self) -> dict[str, float]:
-        return {
+    def as_dict(self) -> dict[str, Any]:
+        payload: dict[str, Any] = {
             "water_max_vv_db": self.water_max_vv_db,
             "water_max_ratio_db": self.water_max_ratio_db,
             "urban_min_vv_db": self.urban_min_vv_db,
             "urban_max_ratio_db": self.urban_max_ratio_db,
             "volume_min_rvi": self.volume_min_rvi,
+            "source": self.source,
         }
+        if self.degenerate_reason:
+            payload["degenerate_reason"] = self.degenerate_reason
+        return payload
 
 
 def _otsu(values: np.ndarray, bins: int = 256) -> float:
@@ -138,6 +148,20 @@ def _otsu(values: np.ndarray, bins: int = 256) -> float:
 # built-up area must be allowed to report none rather than have its brightest
 # 2% relabelled as buildings.
 DOUBLE_BOUNCE_MIN_VV_DB = -6.0
+
+# Fitting needs two populations to separate. Below this many windows the split
+# is being drawn through noise, and a 7x6 km subset can sit entirely inside one
+# surface where a 250x170 km frame never does.
+MIN_WINDOWS_TO_FIT = 200
+# A scene containing both water and land spans tens of dB in VV. A narrow
+# spread means one surface, so a percentile split is halving a single
+# population rather than finding a boundary between two.
+MIN_VV_SPREAD_DB = 8.0
+# Used only when the fit is rejected. Open water in C-band VV sits far below
+# any land surface, so this is well clear of the -6 dB built-up level and
+# cannot produce the overlap that made the fit degenerate.
+FALLBACK_WATER_MAX_VV_DB = -15.0
+FALLBACK_WATER_MAX_RATIO_DB = -12.0
 DOUBLE_BOUNCE_MAX_RATIO_DB = -8.0
 VOLUME_MIN_RVI = 0.55
 
@@ -155,10 +179,22 @@ def fit_thresholds(windows: list[WindowScattering]) -> ScatteringThresholds:
     coastal scene to water against an independent estimate of 36%: a
     monsoon-season sea is rough and never darkens to the calm-water backscatter
     those levels assume.
+
+    Fitting only works when there are two populations to find. A whole IW frame
+    spans ~250x170 km and reliably contains several mechanisms; a small
+    area-of-interest subset may be entirely one surface, and then there is no
+    split to fit. Otsu will still return a number -- it always does -- so the
+    result is checked below rather than trusted, and fixed levels are used when
+    the check fails.
     """
+    if len(windows) < MIN_WINDOWS_TO_FIT:
+        return _fallback_thresholds(
+            f"only {len(windows)} windows sampled; at least {MIN_WINDOWS_TO_FIT} are needed to fit a split"
+        )
+
     ratios = np.array([w.cross_pol_ratio_db for w in windows], dtype=np.float64)
     vv = np.array([w.vv_db for w in windows], dtype=np.float64)
-    return ScatteringThresholds(
+    fitted = ScatteringThresholds(
         # Surface scattering is the darker population; the ratio does the
         # separating and this only stops a bright depolarising window being
         # pulled in by ratio alone.
@@ -167,6 +203,60 @@ def fit_thresholds(windows: list[WindowScattering]) -> ScatteringThresholds:
         urban_min_vv_db=DOUBLE_BOUNCE_MIN_VV_DB,
         urban_max_ratio_db=DOUBLE_BOUNCE_MAX_RATIO_DB,
         volume_min_rvi=VOLUME_MIN_RVI,
+    )
+
+    reason = _degenerate_reason(fitted, vv)
+    if reason is not None:
+        return _fallback_thresholds(reason)
+    return fitted
+
+
+def _degenerate_reason(fitted: ScatteringThresholds, vv: np.ndarray) -> str | None:
+    """Why this fit cannot be believed, or None if it can.
+
+    The decisive check is the ordering. ``water_max_vv_db`` is a percentile of
+    whatever this scene contains, while ``urban_min_vv_db`` is an absolute
+    physical level, so on a scene with no water the percentile drifts upward
+    until it crosses the urban level. Once it does, a cell can satisfy both
+    rules, water is assigned last and therefore wins, and built-up ground gets
+    reported as open water. Observed on a 7x6 km urban subset: water at
+    -5.14 dB against urban at -6.00 dB, which put 26% of a city in the water
+    class.
+    """
+    if fitted.water_max_vv_db >= fitted.urban_min_vv_db:
+        return (
+            f"water threshold ({fitted.water_max_vv_db:.2f} dB) is brighter than the "
+            f"built-up threshold ({fitted.urban_min_vv_db:.2f} dB), so the two classes overlap"
+        )
+    # A scene with genuine water spans a wide brightness range. A narrow one is
+    # a single surface, and the percentile is then splitting one population in
+    # half rather than separating two.
+    spread = float(np.percentile(vv, 95) - np.percentile(vv, 5))
+    if spread < MIN_VV_SPREAD_DB:
+        return (
+            f"VV spans only {spread:.1f} dB across the scene; a single surface has no "
+            "second population to separate"
+        )
+    return None
+
+
+def _fallback_thresholds(reason: str) -> ScatteringThresholds:
+    """Fixed C-band levels, used when this scene cannot support a fit.
+
+    These are deliberately conservative about water. The scene that motivated
+    fitting in the first place was a monsoon sea that never darkens to
+    calm-water levels, so fixed levels under-report water there -- but
+    under-reporting water on a rough sea is a smaller error than reporting a
+    quarter of a city as water, which is what an unchecked fit does.
+    """
+    return ScatteringThresholds(
+        water_max_vv_db=FALLBACK_WATER_MAX_VV_DB,
+        water_max_ratio_db=FALLBACK_WATER_MAX_RATIO_DB,
+        urban_min_vv_db=DOUBLE_BOUNCE_MIN_VV_DB,
+        urban_max_ratio_db=DOUBLE_BOUNCE_MAX_RATIO_DB,
+        volume_min_rvi=VOLUME_MIN_RVI,
+        source="fallback",
+        degenerate_reason=reason,
     )
 
 
