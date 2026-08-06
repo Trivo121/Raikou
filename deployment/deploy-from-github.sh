@@ -57,8 +57,15 @@ log "4/8 Back up current code -> /home/ubuntu/backend-backup-$TS"
 cp -a "$APP_DIR" "/home/ubuntu/backend-backup-$TS"
 
 log "5/8 Sync new backend code (preserving .env and sessions/)"
+# models/ is NOT in the repository and lives only on this box: 13 GB of
+# SARCLIP, BigEarthNet and InternVL weights. --delete removed the whole
+# directory the first time this ran, which took the GPU pipeline down silently
+# -- vLLM then recreated an empty root-owned mount point at the next boot, so
+# nothing pointed at the loss until the weights were looked for. sessions/ is
+# excluded for the same reason. Add to this list, never remove from it.
 rsync -a --delete \
-  --exclude '.env' --exclude 'sessions' --exclude '__pycache__' --exclude '*.pyc' \
+  --exclude '.env' --exclude 'sessions' --exclude 'models' \
+  --exclude '__pycache__' --exclude '*.pyc' \
   "$SRC_DIR/backend/" "$APP_DIR/"
 
 log "6/8 Install python dependencies"
