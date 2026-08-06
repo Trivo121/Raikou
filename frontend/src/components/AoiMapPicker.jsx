@@ -221,7 +221,9 @@ export default function AoiMapPicker({ value, onChange, footprints, selectedId, 
     };
 
     map.on('load', () => {
-      map.addSource('footprints', { type: 'geojson', data: EMPTY });
+      // A 250x170 km frame is large enough to survive simplification, but a
+      // footprint is a five-point ring with nothing to spare; keep it exact.
+      map.addSource('footprints', { type: 'geojson', data: EMPTY, tolerance: 0 });
       map.addLayer({
         id: 'footprints-fill',
         type: 'fill',
@@ -248,7 +250,14 @@ export default function AoiMapPicker({ value, onChange, footprints, selectedId, 
 
       // The AOI sits above the results so its edge stays readable over a
       // stack of overlapping frames.
-      map.addSource('aoi', { type: 'geojson', data: EMPTY });
+      // tolerance:0 is load-bearing, not tuning. maplibre tiles GeoJSON and
+      // simplifies it with Douglas-Peucker at a default tolerance of 0.375
+      // tile units. A small rectangle collapses under that: the feature stays
+      // in the source with exact coordinates, the layer stays visible with
+      // valid paint, and no geometry survives into the tile -- so the box a
+      // user just dragged out is simply never drawn. Verified the source and
+      // layers were correct while nothing rendered; this is the gap between.
+      map.addSource('aoi', { type: 'geojson', data: EMPTY, tolerance: 0 });
       map.addLayer({
         id: 'aoi-fill',
         type: 'fill',
@@ -282,7 +291,9 @@ export default function AoiMapPicker({ value, onChange, footprints, selectedId, 
         },
       });
 
-      map.addSource('aoi-handles', { type: 'geojson', data: EMPTY });
+      // Corner points are the smallest features on the map and would be the
+      // first thing simplification discards.
+      map.addSource('aoi-handles', { type: 'geojson', data: EMPTY, tolerance: 0 });
       map.addLayer({
         id: 'aoi-handles',
         type: 'circle',
