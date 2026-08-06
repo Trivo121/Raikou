@@ -769,7 +769,8 @@ class M3Pipeline:
         return {"vrt_artifact_id": str(artifact["id"])}
 
     def _build_overview(self, task: dict[str, Any]) -> dict[str, Any]:
-        vrt_path, _, _ = self._prepare_vrt(task)
+        vrt_path, _, artifacts = self._prepare_vrt(task)
+        radiometry = self._source_radiometry(artifacts)
         output = self._workdir(task) / "overview-full.jpg"
         try:
             with rasterio.open(vrt_path) as dataset:
@@ -778,7 +779,7 @@ class M3Pipeline:
                 width = max(1, int(source_width * scale))
                 height = max(1, int(source_height * scale))
                 raw = dataset.read(out_shape=(dataset.count, height, width), resampling=Resampling.average)
-                rgb = _build_channels(raw)
+                rgb = _build_channels(raw, radiometry)
             Image.fromarray(rgb).save(output, format="JPEG", quality=88, optimize=True)
             # Downscale is recorded because it decides what may honestly be
             # said about this image: at 25000px wide a vessel is around a
@@ -806,7 +807,8 @@ class M3Pipeline:
         preview_count = 0
         patch_count = 0
         try:
-            iterator = extract_and_preprocess_patches(str(vrt_path), str(task["scene_id"]), metadata)
+            iterator = extract_and_preprocess_patches(str(vrt_path), str(task["scene_id"]), metadata,
+                                                      radiometry=self._source_radiometry(artifacts))
             # One connection is reused for every patch in this scene instead of
             # opening a fresh one per patch (up to ~1000): that per-patch churn
             # was what put the pooler under enough pressure to hang a handoff
@@ -849,7 +851,8 @@ class M3Pipeline:
         SARCLIPEncoder.load_singleton()
         encoded_count = 0
         try:
-            source = extract_and_preprocess_patches(str(vrt_path), str(task["scene_id"]), metadata)
+            source = extract_and_preprocess_patches(str(vrt_path), str(task["scene_id"]), metadata,
+                                                    radiometry=self._source_radiometry(artifacts))
 
             def stable_source():
                 for patch in source:

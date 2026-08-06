@@ -103,9 +103,28 @@ def _is_mostly_nodata(raw_patch: np.ndarray) -> bool:
     return zero_fraction > NODATA_DISCARD_FRACTION
 
 
-def _to_db(raw_band: np.ndarray) -> np.ndarray:
-    """Step 2 — dB conversion: 10 * log10(value + 1)."""
-    return 10.0 * np.log10(raw_band.astype(np.float64) + 1.0)
+def _to_db(raw_band: np.ndarray, radiometry: str | None = None) -> np.ndarray:
+    """Step 2 — dB conversion, by what the pixels actually hold.
+
+    Detected amplitude runs to hundreds or thousands, where the ``+ 1`` only
+    keeps DN=0 finite and is otherwise negligible.
+
+    Provider sigma0 is linear power and mostly *below* 1 -- on a real subset,
+    p25 was 0.025 and p50 was 0.10. There ``log10(x + 1)`` is almost
+    ``x / ln(10)``: the offset swamps the signal, the whole scene lands within
+    a decibel of zero, and the [-25, +5] dB clip that follows maps it into
+    uint8 212..255. Measured on a live scene: 44 distinct levels instead of
+    256, and a sixth of the contrast. Every patch handed to the encoder, and
+    the overview handed to the captioner, came out uniformly bright -- which
+    is what the captioner then faithfully reported.
+    """
+    from app.services.processing.radiometry import DEFAULT_FLOOR_DB, uses_luts
+
+    values = raw_band.astype(np.float64)
+    if not uses_luts(radiometry):
+        floor = 10.0 ** (DEFAULT_FLOOR_DB / 10.0)
+        return 10.0 * np.log10(np.maximum(values, floor))
+    return 10.0 * np.log10(values + 1.0)
 
 
 def _normalize_to_uint8(db_band: np.ndarray) -> np.ndarray:
@@ -114,7 +133,7 @@ def _normalize_to_uint8(db_band: np.ndarray) -> np.ndarray:
     scaled = (clipped - DB_FLOOR) / (DB_CEILING - DB_FLOOR) * 255.0
     return scaled.astype(np.uint8)
 
-def _build_channels(raw_patch: np.ndarray) -> np.ndarray:
+def _build_channels(raw_patch: np.ndarray, radiometry: str | None = None) -> np.ndarray:
     """
     Step 4 — channel replication / polarimetric combination.
 
@@ -131,13 +150,13 @@ def _build_channels(raw_patch: np.ndarray) -> np.ndarray:
     band_count = raw_patch.shape[0]
 
     if band_count == 1:
-        db = _to_db(raw_patch[0])
+        db = _to_db(raw_patch[0], radiometry)
         norm = _normalize_to_uint8(db)
         return np.stack([norm, norm, norm], axis=-1)
 
     if band_count == 2:
-        vv_db = _to_db(raw_patch[0])
-        vh_db = _to_db(raw_patch[1])
+        vv_db = _to_db(raw_patch[0], radiometry)
+        vh_db = _to_db(raw_patch[1], radiometry)
         ratio_db = vv_db - vh_db  # meaningful polarimetric contrast
 
         vv_norm = _normalize_to_uint8(vv_db)
@@ -163,7 +182,7 @@ def _build_channels(raw_patch: np.ndarray) -> np.ndarray:
     )
 
 
-def preprocess_patch(raw_patch: np.ndarray) -> Optional[np.ndarray]:
+def preprocess_patch(raw_patch: np.ndarray, radiometry: str | None = None) -> Optional[np.ndarray]:
     """
     Full Feature 2 chain for one raw window. Returns a 224x224x3 uint8
     array, or None if the patch was discarded for no-data.
@@ -171,7 +190,7 @@ def preprocess_patch(raw_patch: np.ndarray) -> Optional[np.ndarray]:
     if _is_mostly_nodata(raw_patch):
         return None
 
-    rgb = _build_channels(raw_patch)
+    rgb = _build_channels(raw_patch, radiometry)
 
     # Step 5 — resize confirmation. Should already be exact since we cut
     # at PATCH_SIZE directly; this is a hard guard, not a fallback resize.
@@ -193,6 +212,7 @@ def extract_and_preprocess_patches(
     file_path: str,
     session_id: str,
     scene_metadata: dict,
+    radiometry: str | None = None,
 ) -> Iterator[ProcessedPatch]:
     """
     The single fused loop: read one window from disk -> preprocess it
@@ -209,7 +229,7 @@ def extract_and_preprocess_patches(
             # Windowed read — only these pixels enter RAM, for all bands.
             raw_patch = dataset.read(window=window)  # shape (bands, H, W)
 
-            processed = preprocess_patch(raw_patch)
+            processed = preprocess_patch(raw_patch, radiometry)
             if processed is None:
                 continue  # discarded for no-data, move to next window
 
@@ -277,7 +297,7 @@ def generate_overview(vrt_path: str, session_id: str):
                 )
                 
                 # Use the exact same dB mapping as micro-patches
-                rgb_overview = _build_channels(raw_patch=raw_overview)
+                rgb_overview = _build_channels(raw_patch=raw_overview, radiometry=radiometry)
                 
                 filename = f"overview_{label}.jpg"
                 out_path = os.path.join(session_dir, filename)
@@ -330,7 +350,7 @@ def get_base64_patches(session_id: str, coordinates: list[tuple[int, int]]) -> l
                 try:
                     window = Window(col, row, PATCH_SIZE, PATCH_SIZE)
                     raw_patch = dataset.read(window=window)
-                    processed = preprocess_patch(raw_patch)
+                    processed = preprocess_patch(raw_patch, radiometry)
                     if processed is not None:
                         image = Image.fromarray(processed)
                         buf = io.BytesIO()
