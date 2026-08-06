@@ -252,6 +252,11 @@ class Settings(BaseSettings):
     # this is what caps an area of interest at roughly 25 x 25 km.
     COPERNICUS_SUBSET_MAX_PIXELS: int = Field(default=2500, ge=256, le=2500)
     COPERNICUS_SUBSET_TIMEOUT_SECONDS: float = Field(default=300.0, gt=0, le=900)
+    # In-request retries for a transient provider 5xx. Kept separate from the
+    # durable task ladder so a one-minute upstream wobble does not consume the
+    # five attempts reserved for failures that are actually ours.
+    COPERNICUS_SUBSET_MAX_ATTEMPTS: int = Field(default=3, ge=1, le=10)
+    COPERNICUS_SUBSET_RETRY_BASE_SECONDS: float = Field(default=4.0, gt=0, le=60)
     COPERNICUS_MAX_SEARCH_RESULTS: int = Field(default=50, ge=1, le=200)
     COPERNICUS_MAX_SEARCH_DAYS: int = Field(default=90, ge=1, le=3660)
     COPERNICUS_MAX_AOI_SQ_KM: float = Field(default=250_000.0, gt=0, le=10_000_000)

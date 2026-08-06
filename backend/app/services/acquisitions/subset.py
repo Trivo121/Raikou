@@ -33,6 +33,7 @@ from dataclasses import dataclass
 from datetime import timedelta
 import logging
 import math
+import time
 from pathlib import Path
 from typing import Any
 
@@ -184,33 +185,71 @@ def fetch_subset(
     body = _request_body(product, bbox, plan)
     token = access_token()
 
+    def _detail(response: httpx.Response) -> str:
+        """A snippet of what the provider actually said.
+
+        Worth the care: a 200 body is a TIFF, so decoding it as text produces
+        noise. Reporting only the status code cost a live diagnosis once --
+        the failure was transient and the reason was in the body we discarded.
+        """
+        if "json" in (response.headers.get("content-type") or "") or response.status_code >= 400:
+            try:
+                return response.text[:300].replace("\n", " ").strip()
+            except Exception:
+                return "(unreadable body)"
+        return ""
+
+    # A brief upstream wobble should not cost the task its retry budget. The
+    # durable ladder backs off 5/10/20/40/80s and gives up after five, which a
+    # 500 lasting a minute can exhaust before the provider recovers -- observed
+    # doing exactly that. Riding out the blip here keeps those five attempts
+    # for failures that are actually ours.
+    attempts = max(1, settings.COPERNICUS_SUBSET_MAX_ATTEMPTS)
+    last_detail = ""
+    payload: bytes | None = None
+    response: httpx.Response | None = None
+
     with _http_client(settings.COPERNICUS_SUBSET_TIMEOUT_SECONDS) as client:
-        response = client.post(
-            settings.COPERNICUS_PROCESS_URL,
-            headers={"Authorization": f"Bearer {token}"},
-            json=body,
-        )
-        if response.status_code in (401, 403):
-            # One retry with a fresh token: the cached one may have aged out
-            # mid-flight on a long job.
-            token = access_token(force_refresh=True)
+        for attempt in range(1, attempts + 1):
             response = client.post(
                 settings.COPERNICUS_PROCESS_URL,
                 headers={"Authorization": f"Bearer {token}"},
                 json=body,
             )
-        if response.status_code in (401, 403):
-            raise CopernicusAuthError("Sentinel Hub rejected the configured credentials.")
-        if response.status_code == 429:
-            raise CopernicusUnavailableError("Sentinel Hub is rate limiting; try again shortly.")
-        if response.status_code >= 500:
-            raise CopernicusUnavailableError(
-                f"Sentinel Hub returned {response.status_code} for the subset request."
-            )
-        if response.status_code != 200:
-            detail = response.text[:300].replace("\n", " ")
-            raise CopernicusError(f"Sentinel Hub rejected the subset request: {detail}")
-        payload = response.content
+            if response.status_code in (401, 403):
+                # The cached token may have aged out mid-flight on a long job.
+                token = access_token(force_refresh=True)
+                response = client.post(
+                    settings.COPERNICUS_PROCESS_URL,
+                    headers={"Authorization": f"Bearer {token}"},
+                    json=body,
+                )
+            if response.status_code == 200:
+                payload = response.content
+                break
+            if response.status_code in (401, 403):
+                raise CopernicusAuthError(
+                    f"Sentinel Hub rejected the configured credentials. {_detail(response)}".strip()
+                )
+            last_detail = _detail(response)
+            retryable = response.status_code == 429 or response.status_code >= 500
+            if not retryable:
+                raise CopernicusError(
+                    f"Sentinel Hub rejected the subset request ({response.status_code}). {last_detail}".strip()
+                )
+            if attempt < attempts:
+                delay = settings.COPERNICUS_SUBSET_RETRY_BASE_SECONDS * (2 ** (attempt - 1))
+                logger.warning(
+                    "Sentinel Hub returned %s for the subset request; retrying in %ss (%s/%s). %s",
+                    response.status_code, delay, attempt, attempts, last_detail,
+                )
+                time.sleep(delay)
+
+    if payload is None:
+        raise CopernicusUnavailableError(
+            f"Sentinel Hub returned {response.status_code if response else 'no response'} for the "
+            f"subset request after {attempts} attempts. {last_detail}".strip()
+        )
 
     processing_units = _float_or_none(response.headers.get("x-processingunits-spent"))
     destination_dir.mkdir(parents=True, exist_ok=True)
