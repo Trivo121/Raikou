@@ -160,13 +160,14 @@ Measured requirements: **9.6 GB VRAM** peak across all three models, **~10 GB RA
 
 ```bash
 cp .env.example .env      # Supabase, S3, Qdrant, Copernicus credentials
-docker compose up -d      # redis, minio, qdrant
 
-cd backend && pip install -r requirements.txt
-uvicorn main:app --reload                    # API
-python -m app.workers.dispatcher             # outbox -> queue
-python -m app.workers.runner --class cpu     # worker
+# Start the database, storage, and all backend services (API, queue, workers)
+docker compose up --build -d
 
+# (Optional) To run with GPU acceleration (vLLM and worker-gpu)
+# docker compose --profile gpu up --build -d
+
+# Start the frontend development server
 cd frontend && npm install && npm run dev
 ```
 
