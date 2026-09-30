@@ -1,0 +1,19 @@
+# API-only install for small hosts: serves projects, scenes, artifacts and
+# conversation history without the ML stack. Processing workers and new
+# evidence search still need the full requirements.txt (torch, open_clip).
+fastapi>=0.111.0
+uvicorn>=0.30.1
+pydantic>=2.7.4
+pydantic-settings>=2.3.3
+qdrant-client>=1.9.1
+redis>=5.0.0
+boto3>=1.34.122
+python-multipart>=0.0.9
+python-dotenv>=1.0.1
+numpy>=1.26.4
+rasterio>=1.3.10
+Pillow>=10.0.0
+openai>=1.0.0
+httpx>=0.27,<1
+supabase
+psycopg[binary]>=3.2.0

@@ -48,7 +48,6 @@ from app.services.cache.evidence import (
     set_json_cache,
 )
 from app.services.database import get_supabase
-from app.services.models.sarclip_encoder import SARCLIPEncoder
 from app.services.processing.chat_policy import (
     ChatIntent,
     classify_scene_query,
@@ -321,6 +320,11 @@ async def _query_embedding(
         return [float(item) for item in cached]
 
     try:
+        # Imported here, not at module load, so an API-only deployment without
+        # torch can still serve projects, scenes and conversation history; only
+        # this path needs the encoder, and its absence surfaces as the 503 below.
+        from app.services.models.sarclip_encoder import SARCLIPEncoder
+
         vector = await run_in_threadpool(lambda: SARCLIPEncoder.load_singleton().encode_text(query))
     except Exception as exc:
         logger.info("M5 query embedding failed", exc_info=True)
