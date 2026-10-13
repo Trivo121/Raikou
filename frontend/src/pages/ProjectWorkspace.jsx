@@ -97,6 +97,7 @@ function useWorkspaceLocation() {
   // scenes column is needed: the upload panel already hides itself as soon as
   // a job exists, and processing_jobs.stage identifies the path after that.
   const source = params.get('source') === 'copernicus' ? 'copernicus' : null;
+  const prompt = params.get('prompt') || params.get('q') || null;
   const update = (next) => {
     const value = new URLSearchParams(params);
     Object.entries(next).forEach(([key, entry]) => {
@@ -105,7 +106,7 @@ function useWorkspaceLocation() {
     });
     setParams(value, { replace: true });
   };
-  return { tab, sceneId, patchId, conversationId, source, update };
+  return { tab, sceneId, patchId, conversationId, source, prompt, update };
 }
 
 export default function ProjectWorkspace() {
@@ -299,8 +300,8 @@ export default function ProjectWorkspace() {
             onUploadStateChange={refreshWorkspace}
           />
         )}
-        {location.tab === 'evidence' && <EvidenceSearchPanel api={api} projectId={projectId} scenes={workspace?.scenes || []} selectedSceneId={resolvedSceneId} onSelectScene={(sceneId) => location.update({ tab: 'scenes', scene: sceneId, patch: null })} onOpenPatch={(patchId, sceneId) => { setOpenedPatchId(null); location.update({ tab: 'scenes', scene: sceneId, patch: patchId }); }} />}
-        {location.tab === 'ask' && <GroundedChatPanel api={api} userId={user?.id} projectId={projectId} scenes={workspace?.scenes || []} selectedSceneId={resolvedSceneId} conversationId={location.conversationId} onConversationChange={(conversationId) => location.update({ conversation: conversationId })} onOpenPatch={(patchId, sceneId) => { setOpenedPatchId(null); location.update({ tab: 'scenes', scene: sceneId, patch: patchId }); }} onOpenPreview={openPreview} onOpenScene={(sceneId) => location.update({ tab: 'scenes', scene: sceneId, patch: null })} />}
+        {location.tab === 'evidence' && <EvidenceSearchPanel api={api} projectId={projectId} scenes={workspace?.scenes || []} selectedSceneId={resolvedSceneId} onSelectScene={(sceneId) => location.update({ tab: 'scenes', scene: sceneId, patch: null })} onOpenPatch={(patchId, sceneId) => { setOpenedPatchId(null); location.update({ tab: 'scenes', scene: sceneId, patch: patchId }); }} onAsk={(query, sceneId) => location.update({ tab: 'ask', prompt: query, scene: sceneId || resolvedSceneId, patch: null })} />}
+        {location.tab === 'ask' && <GroundedChatPanel api={api} userId={user?.id} projectId={projectId} scenes={workspace?.scenes || []} selectedSceneId={resolvedSceneId} conversationId={location.conversationId} initialPrompt={location.prompt} onClearInitialPrompt={() => location.update({ prompt: null, q: null })} onConversationChange={(conversationId) => location.update({ conversation: conversationId })} onOpenPatch={(patchId, sceneId) => { setOpenedPatchId(null); location.update({ tab: 'scenes', scene: sceneId, patch: patchId }); }} onOpenPreview={openPreview} onOpenScene={(sceneId) => location.update({ tab: 'scenes', scene: sceneId, patch: null })} />}
       </div>
 
       {isAddingScene && (

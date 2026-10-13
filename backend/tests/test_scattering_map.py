@@ -179,6 +179,46 @@ def test_tall_narrow_map_gets_a_canvas_wide_enough_for_its_legend() -> None:
     assert image.height < 2 * MAX_RENDER_HEIGHT
 
 
+def _subset_dataset(vv: np.ndarray, vh: np.ndarray):
+    """A map-projected two-band provider subset at 10 m, held in memory."""
+    from rasterio.io import MemoryFile
+    from rasterio.transform import from_origin
+
+    memfile = MemoryFile()
+    with memfile.open(
+        driver="GTiff", width=vv.shape[1], height=vv.shape[0], count=2, dtype="float32",
+        crs="EPSG:32644", transform=from_origin(500000, 2000000, 10, 10),
+    ) as dataset:
+        dataset.write(vv.astype("float32"), 1)
+        dataset.write(vh.astype("float32"), 2)
+    return memfile.open()
+
+
+def test_small_subset_gets_a_finer_grid_with_the_same_looks() -> None:
+    from app.services.processing.radiometry import SIGMA0_LINEAR
+    from app.services.processing.scattering_map import compute_mechanism_map
+
+    vv = np.full((60, 60), 0.1)    # canopy: VV -10 dB
+    vh = np.full((60, 60), 0.02)   # VH -17 dB
+    vv[:, :30] = 0.004             # calm water: VV -24 dB
+    vh[:, :30] = 0.0               # ...and VH clamped to 0 by the provider's noise removal
+    with _subset_dataset(vv, vh) as dataset:
+        result = compute_mechanism_map(dataset, {}, None, THRESHOLDS, radiometry=SIGMA0_LINEAR)
+
+    assert result is not None
+    # A 600 m square on a 20 m grid, each decision still averaging 6 x 6 pixels.
+    assert result.shape == (30, 30)
+    assert (result.ground_sampling_m, result.window_m, result.looks) == (20.0, 60.0, 36)
+    # VH == 0 is a reading below the noise, not a gap: the water is classified,
+    # corners included, rather than punched through with no-data.
+    assert (result.labels[:, :12] == MECHANISMS.index("smooth_surface")).all()
+    assert (result.labels[:, 18:] == MECHANISMS.index("volume")).all()
+    assert result.brightness_db is not None and result.brightness_db.shape == result.shape
+    payload = map_payload(result)
+    assert payload["is_map_projected"] is True
+    assert payload["averaging_window_m"] == 60.0
+
+
 def test_render_survives_an_all_nodata_grid() -> None:
     labels = np.full((20, 20), NODATA_LABEL, dtype=np.uint8)
 

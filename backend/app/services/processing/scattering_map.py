@@ -5,17 +5,20 @@ the same measurement and the same fitted thresholds, evaluated on a block-mean
 grid instead of on sampled windows, so the two are two views of one result rather
 than two analyses that might disagree.
 
-Why this needs no model and no sliding window: the mechanism rule is pointwise
-arithmetic on two numbers per cell, not a learned mapping.  Once VV and VH are
-calibrated and denoised, assigning a label is a comparison, so the whole raster
-is classified in one vectorised pass.
+Why this needs no model: the mechanism rule is pointwise arithmetic on two
+numbers per cell, not a learned mapping.  Once VV and VH are calibrated and
+denoised, assigning a label is a comparison, so the whole raster is classified
+in one vectorised pass.
 
 The hard part is speckle, not classification.  Speckle is multiplicative and a
-single 10 m pixel's cross-pol ratio is close to meaningless, so cells are built
-by averaging **power** over a block of pixels -- averaging amplitude, or
-averaging decibels, both bias the result low.  A block factor of six gives 36
-looks and drops the ratio's noise well inside the gap between the fitted
-thresholds, at a cost of 60 m ground sampling.
+single 10 m pixel's cross-pol ratio is close to meaningless, so every decision
+averages **power** over 6 x 6 pixels -- averaging amplitude, or averaging
+decibels, both bias the result low.  That gives 36 looks and drops the ratio's
+noise well inside the gap between the fitted thresholds.  A full frame is drawn
+on that 60 m grid directly.  A small area of interest would then be only ~100
+cells across, so it is drawn on a 20 m grid instead, with the 60 m average
+slid across it: each decision still has 36 looks, but the map follows the
+scene's edges three times more closely.
 
 A GRD band carries no CRS, so for a full frame the output is in radar geometry:
 it aligns pixel-for-pixel with the scene overview built from the same VRT and
@@ -45,6 +48,9 @@ from app.services.processing.radiometry import DN_WITH_LUTS
 # looks, which drops the ratio's noise inside the gap between the fitted
 # thresholds, at a cost of 60 m cells.
 TARGET_GROUND_SAMPLING_M = 60.0
+# On a small raster, how many grid cells span one averaging window. Three turns
+# the 60 m window into a 20 m grid; the looks per decision are unchanged.
+FINE_STEPS = 3
 from app.services.processing.scattering import (
     MECHANISM_DESCRIPTIONS,
     MECHANISMS,
@@ -96,6 +102,13 @@ class MechanismMap:
     # subset. The caption states this either way: a reader who overlays a
     # radar-geometry image on a basemap gets a wrong answer that looks right.
     geometry: str = "radar"
+    # VV backscatter (dB) per cell, used only to shade the picture so that the
+    # coastline, built-up texture and ships stay visible under the colours. It
+    # never enters the classification.
+    brightness_db: np.ndarray | None = None
+    # Side of the averaging window in metres when it is larger than a cell, i.e.
+    # when the window slides across a finer grid. None means one cell, one window.
+    window_m: float | None = None
 
     @property
     def shape(self) -> tuple[int, int]:
@@ -180,7 +193,12 @@ def compute_mechanism_map(
     sampling_m = ground_sampling_metres(dataset, fallback=10.0)
     by_looks = max(1, int(round(TARGET_GROUND_SAMPLING_M / max(sampling_m, 0.1))))
     by_width = max(1, dataset.width // max(1, target_width))
-    block = max(by_looks, by_width)
+    # The grid may be finer than the averaging window; the window then slides
+    # across it (window_cells per side). A full frame is capped by target_width
+    # at the window size already, so there block == by_looks, window_cells == 1,
+    # and nothing changes.
+    block = max(max(1, by_looks // FINE_STEPS), by_width)
+    window_cells = max(1, int(round(by_looks / block)))
     out_width = dataset.width // block
     out_height = dataset.height // block
     if out_width < 2 or out_height < 2:
@@ -198,8 +216,18 @@ def compute_mechanism_map(
         if raw.shape[1] != rows or raw.shape[2] != used_width:
             continue
 
-        # Zero DN is the GRD no-data marker; it must not enter the block mean.
-        good = (raw[0] != 0) & (raw[1] != 0)
+        if needs_luts:
+            # Zero DN is the GRD no-data marker; it must not enter the block mean.
+            good = (raw[0] != 0) & (raw[1] != 0)
+        else:
+            # Provider sigma0 clamps noise-subtracted values to exactly 0, so a
+            # zero in one band is a reading below the noise, not a gap: on a
+            # calm-sea subset 31% of VH over water was 0, and treating it as
+            # no-data punched holes through the sea. Only nothing in either band
+            # means outside the coverage.
+            good = (
+                np.isfinite(raw[0]) & np.isfinite(raw[1]) & ((raw[0] != 0) | (raw[1] != 0))
+            )
 
         if needs_luts:
             cal_vv = calibration["VV"].window(row_off, 0, rows, used_width)
@@ -229,12 +257,34 @@ def compute_mechanism_map(
         )
 
     per_cell = float(block * block)
-    coverage = valid_sum / per_cell
-    usable = coverage >= min_valid_fraction
+    cell_usable = valid_sum / per_cell >= min_valid_fraction
+    with np.errstate(divide="ignore", invalid="ignore"):
+        # Per-cell VV, kept only to shade the picture.
+        brightness_db = np.where(
+            cell_usable,
+            10.0 * np.log10(np.maximum(vv_sum / np.maximum(valid_sum, 1.0), 1e-12)),
+            np.nan,
+        ).astype(np.float32)
+
+    if window_cells > 1:
+        # Slide the averaging window: sums over window_cells x window_cells
+        # neighbouring cells, so every decision averages the same by_looks x
+        # by_looks pixels a full frame's single cell does.
+        vv_sum = _box_sum(vv_sum, window_cells)
+        vh_sum = _box_sum(vh_sum, window_cells)
+        window_valid = _box_sum(valid_sum, window_cells)
+        # Coverage is judged against the part of the window inside the raster,
+        # so edge and corner cells are not blanked for the pixels that simply
+        # do not exist beyond the border.
+        inside = _box_sum(np.ones_like(valid_sum), window_cells)
+        usable = cell_usable & (window_valid / (per_cell * inside) >= min_valid_fraction)
+    else:
+        window_valid = valid_sum
+        usable = cell_usable
 
     with np.errstate(divide="ignore", invalid="ignore"):
-        vv_mean = np.where(usable, vv_sum / np.maximum(valid_sum, 1.0), np.nan)
-        vh_mean = np.where(usable, vh_sum / np.maximum(valid_sum, 1.0), np.nan)
+        vv_mean = np.where(usable, vv_sum / np.maximum(window_valid, 1.0), np.nan)
+        vh_mean = np.where(usable, vh_sum / np.maximum(window_valid, 1.0), np.nan)
         vv_db = 10.0 * np.log10(np.maximum(vv_mean, 1e-12))
         vh_db = 10.0 * np.log10(np.maximum(vh_mean, 1e-12))
         ratio_db = 10.0 * np.log10(np.maximum(vh_mean, 1e-12) / np.maximum(vv_mean, 1e-12))
@@ -270,10 +320,50 @@ def compute_mechanism_map(
         # orthorectified subset can be requested at any resolution, and
         # assuming 10 m for one of those mislabels every distance on the map.
         ground_sampling_m=float(block * ground_sampling_metres(dataset, fallback=10.0)),
-        looks=int(block * block),
+        looks=int((block * window_cells) ** 2),
         valid_fraction=valid_fraction,
         geometry="map" if getattr(dataset, "crs", None) else "radar",
+        brightness_db=brightness_db,
+        window_m=(
+            float(block * window_cells * ground_sampling_metres(dataset, fallback=10.0))
+            if window_cells > 1
+            else None
+        ),
     )
+
+
+def _box_sum(values: np.ndarray, size: int) -> np.ndarray:
+    """Sum over a size x size neighbourhood centred on each cell, zero outside."""
+    before = size // 2
+    after = size - 1 - before
+    padded = np.pad(values, ((before, after), (before, after)))
+    integral = np.pad(padded.cumsum(axis=0).cumsum(axis=1), ((1, 0), (1, 0)))
+    return (
+        integral[size:, size:]
+        - integral[:-size, size:]
+        - integral[size:, :-size]
+        + integral[:-size, :-size]
+    )
+
+
+def _shading(brightness_db: np.ndarray | None, labels: np.ndarray) -> np.ndarray | None:
+    """Per-cell brightness factor in [0.42, 1] from VV, or None to draw flat.
+
+    Stretched between the scene's own 2nd and 98th percentiles, so calm water
+    comes out dark and ships, breakwaters and building blocks stand out, the way
+    they do on the overview. The floor keeps every colour recognisable.
+    """
+    if brightness_db is None or brightness_db.shape != labels.shape:
+        return None
+    valid = np.isfinite(brightness_db) & (labels != NODATA_LABEL)
+    if valid.sum() < 16:
+        return None
+    low, high = np.percentile(brightness_db[valid], [2, 98])
+    if not np.isfinite(low) or high - low < 1e-6:
+        return None
+    stretched = np.clip((brightness_db - low) / (high - low), 0.0, 1.0)
+    factor = 0.42 + 0.58 * np.power(stretched, 0.8)
+    return np.where(valid, factor, 1.0)
 
 
 def _load_font(size: int):
@@ -339,6 +429,11 @@ def render_mechanism_png(
         red, green, blue = MECHANISM_COLORS[name]
         selected = labels == index
         rgb[selected] = (red, green, blue, 255)
+    # Colour says which mechanism; brightness follows the cell's own VV, so the
+    # picture keeps the texture of the scene instead of four flat fills.
+    shade = _shading(mechanism_map.brightness_db, labels)
+    if shade is not None:
+        rgb[..., :3] = np.clip(rgb[..., :3] * shade[..., None], 0, 255).astype(np.uint8)
     # No-data stays fully transparent so the ragged scene edge does not read as
     # a fifth class.
     rgb[labels == NODATA_LABEL] = (0, 0, 0, 0)
@@ -405,13 +500,21 @@ def render_mechanism_png(
         fill=(214, 214, 220, 255),
         font=small_font,
     )
+    sampling = (
+        f"{mechanism_map.ground_sampling_m:.0f} m grid, {mechanism_map.window_m:.0f} m sliding average "
+        f"({mechanism_map.looks} looks), "
+        if mechanism_map.window_m
+        else f"{mechanism_map.ground_sampling_m:.0f} m sampling, {mechanism_map.looks} looks, "
+    )
+    shading_note = " Brightness follows VV backscatter." if mechanism_map.brightness_db is not None else ""
     detail = (
-        f"{mechanism_map.ground_sampling_m:.0f} m sampling, {mechanism_map.looks} looks, "
+        sampling
         + (
             "map-projected."
             if mechanism_map.geometry == "map"
             else "radar geometry (no CRS - not map-projected)."
         )
+        + shading_note
     )
     if scene_name:
         detail = f"{scene_name[:60]} - {detail}"
@@ -435,10 +538,12 @@ def map_payload(mechanism_map: MechanismMap) -> dict[str, Any]:
         "height_px": height,
         "block_factor": mechanism_map.block_factor,
         "ground_sampling_m": mechanism_map.ground_sampling_m,
+        "averaging_window_m": mechanism_map.window_m or mechanism_map.ground_sampling_m,
         "looks": mechanism_map.looks,
         "valid_fraction": round(mechanism_map.valid_fraction, 4),
         "geometry": mechanism_map.geometry,
-        "is_map_projected": False,
+        # An orthorectified provider subset is on a map grid; a GRD frame is not.
+        "is_map_projected": mechanism_map.geometry == "map",
         "aligns_with": "scene overview built from the same VRT",
         "legend": [
             {

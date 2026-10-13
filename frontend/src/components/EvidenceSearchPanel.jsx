@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from 'react';
-import { AlertTriangle, MapPin, Search, ShieldCheck, Sparkles } from 'lucide-react';
+import { AlertTriangle, MapPin, MessageSquare, Search, ShieldCheck, Sparkles } from 'lucide-react';
 
 function readable(value, fallback = 'Not available') {
   if (!value) return fallback;
@@ -17,7 +17,7 @@ function boundsText(bounds) {
   return `Rows ${bounds.row_start}–${bounds.row_end} · Cols ${bounds.col_start}–${bounds.col_end}`;
 }
 
-export default function EvidenceSearchPanel({ api, projectId, scenes, selectedSceneId, onSelectScene, onOpenPatch }) {
+export default function EvidenceSearchPanel({ api, projectId, scenes, selectedSceneId, onSelectScene, onOpenPatch, onAsk }) {
   const [query, setQuery] = useState('');
   const [scopeSceneId, setScopeSceneId] = useState('');
   const [sensor, setSensor] = useState('');
@@ -95,7 +95,20 @@ export default function EvidenceSearchPanel({ api, projectId, scenes, selectedSc
         <label htmlFor="evidence-query" className="text-xs font-semibold text-zinc-200">What evidence are you looking for?</label>
         <div className="mt-2 flex flex-col gap-2 sm:flex-row">
           <div className="relative min-w-0 flex-1"><Search className="pointer-events-none absolute left-3 top-1/2 -translate-y-1/2 text-zinc-600" size={16} /><input id="evidence-query" value={query} onChange={(event) => setQuery(event.target.value)} maxLength={1000} placeholder="e.g. compact bright structures near shoreline" className="w-full rounded-lg border border-white/[0.1] bg-black/20 py-2.5 pl-9 pr-3 text-sm text-white outline-none placeholder:text-zinc-600 focus:border-sky-400/55 focus:ring-2 focus:ring-sky-400/10" /></div>
-          <button type="submit" disabled={!query.trim() || isSearching || readyScenes.length === 0} className="inline-flex items-center justify-center gap-2 rounded-lg bg-sky-500 px-4 py-2.5 text-sm font-semibold text-white transition hover:bg-sky-400 disabled:cursor-not-allowed disabled:opacity-45"><Search size={15} /> {isSearching ? 'Searching…' : 'Search evidence'}</button>
+          <div className="flex gap-2">
+            <button type="submit" disabled={!query.trim() || isSearching || readyScenes.length === 0} className="inline-flex items-center justify-center gap-2 rounded-lg bg-sky-500 px-4 py-2.5 text-sm font-semibold text-white transition hover:bg-sky-400 disabled:cursor-not-allowed disabled:opacity-45"><Search size={15} /> {isSearching ? 'Searching…' : 'Search evidence'}</button>
+            {onAsk && (
+              <button
+                type="button"
+                onClick={() => onAsk(query, scopeSceneId)}
+                disabled={!query.trim()}
+                title="Send this query as a prompt to the Grounded Ask assistant"
+                className="inline-flex items-center justify-center gap-1.5 rounded-lg border border-white/[0.1] bg-white/[0.04] px-3.5 py-2.5 text-sm font-semibold text-zinc-300 transition hover:bg-white/[0.08] hover:text-white disabled:cursor-not-allowed disabled:opacity-40"
+              >
+                <MessageSquare size={14} className="text-sky-400" /> Ask AI
+              </button>
+            )}
+          </div>
         </div>
         <div className="mt-4 grid gap-3 sm:grid-cols-2 xl:grid-cols-5">
           <Filter label="Scope"><select value={scopeSceneId} onChange={(event) => setScopeSceneId(event.target.value)} className="select-control"><option value="">Entire project</option>{readyScenes.map((scene) => <option key={scene.id} value={scene.id}>{scene.name}</option>)}</select></Filter>

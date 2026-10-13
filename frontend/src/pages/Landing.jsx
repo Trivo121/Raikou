@@ -177,16 +177,6 @@ export default function Landing() {
 
           {/* CTA row */}
           <div className="flex items-center gap-2">
-            {/* ── placeholder: Supabase login handled in Login.js ── */}
-            <button
-              onClick={goLogin}
-              className="px-4 py-2 rounded-lg bg-transparent border-0 cursor-pointer transition-colors duration-150 hover:text-white"
-              style={{ fontSize: '13px', color: T.textMuted }}
-            >
-              Login
-            </button>
-
-            {/* ── placeholder: Supabase signup / request access ── */}
             <button
               onClick={goLogin}
               className="px-5 py-2 rounded-lg border-0 text-white font-medium cursor-pointer transition-all duration-150 active:scale-[0.96]"
@@ -194,7 +184,7 @@ export default function Landing() {
               onMouseEnter={e => (e.currentTarget.style.backgroundColor = '#007ecc')}
               onMouseLeave={e => (e.currentTarget.style.backgroundColor = T.accent)}
             >
-              Request Access
+              Sign In
             </button>
           </div>
         </nav>
@@ -294,24 +284,10 @@ export default function Landing() {
             <div className="flex items-center justify-center gap-3 flex-wrap">
               <button
                 onClick={goLogin}
-                className="px-7 rounded-[10px] border-0 text-white font-medium cursor-pointer transition-all duration-150 active:scale-[0.97]"
-                style={{ fontSize: '14px', backgroundColor: T.accent, padding: '13px 28px' }}
+                className="px-8 rounded-[10px] border-0 text-white font-medium cursor-pointer transition-all duration-150 active:scale-[0.97]"
+                style={{ fontSize: '14px', backgroundColor: T.accent, padding: '13px 32px' }}
                 onMouseEnter={e => (e.currentTarget.style.backgroundColor = '#007ecc')}
                 onMouseLeave={e => (e.currentTarget.style.backgroundColor = T.accent)}
-              >
-                Request Access
-              </button>
-              <button
-                onClick={goLogin}
-                className="rounded-[10px] cursor-pointer bg-transparent transition-all duration-150 hover:text-white"
-                style={{
-                  fontSize: '14px',
-                  color: T.textMuted,
-                  border: '1px solid rgba(255,255,255,0.13)',
-                  padding: '13px 28px',
-                }}
-                onMouseEnter={e => (e.currentTarget.style.borderColor = 'rgba(255,255,255,0.28)')}
-                onMouseLeave={e => (e.currentTarget.style.borderColor = 'rgba(255,255,255,0.13)')}
               >
                 Sign In →
               </button>
@@ -509,7 +485,7 @@ export default function Landing() {
               className="mx-auto mb-10"
               style={{ fontSize: '14px', color: T.textMuted, maxWidth: '460px', lineHeight: 1.78 }}
             >
-              Limited seats for qualified operators and researchers. Apply for private beta access.
+              Sign in to explore all-weather, project-scoped satellite retrieval.
             </p>
             <button
               onClick={goLogin}
@@ -518,7 +494,7 @@ export default function Landing() {
               onMouseEnter={e => (e.currentTarget.style.backgroundColor = '#007ecc')}
               onMouseLeave={e => (e.currentTarget.style.backgroundColor = T.accent)}
             >
-              Request Access
+              Sign In →
             </button>
           </div>
         </section>

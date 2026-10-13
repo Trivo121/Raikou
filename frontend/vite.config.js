@@ -14,6 +14,7 @@ export default defineConfig({
     loader: 'jsx',
   },
   optimizeDeps: {
+    exclude: ['maplibre-gl'],
     esbuildOptions: {
       loader: {
         '.js': 'jsx',

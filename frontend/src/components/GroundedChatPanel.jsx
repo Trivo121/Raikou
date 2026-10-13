@@ -133,7 +133,7 @@ function CitationGrid({ citations, onOpenPatch, onOpenPreview, onOpenScene }) {
   })}</div>;
 }
 
-export default function GroundedChatPanel({ api, userId, projectId, scenes, selectedSceneId, conversationId, onConversationChange, onOpenPatch, onOpenPreview, onOpenScene }) {
+export default function GroundedChatPanel({ api, userId, projectId, scenes, selectedSceneId, conversationId, initialPrompt, onClearInitialPrompt, onConversationChange, onOpenPatch, onOpenPreview, onOpenScene }) {
   const queryClient = useQueryClient();
   const [draft, setDraft] = useState('');
   const [scopeSceneId, setScopeSceneId] = useState(selectedSceneId || '');
@@ -226,6 +226,23 @@ export default function GroundedChatPanel({ api, userId, projectId, scenes, sele
     }
   };
 
+  useEffect(() => {
+    if (initialPrompt && initialPrompt.trim()) {
+      setDraft(initialPrompt);
+      onClearInitialPrompt?.();
+    }
+  }, [initialPrompt, onClearInitialPrompt]);
+
+  const handleKeyDown = (event) => {
+    if (event.key === 'Enter' && !event.shiftKey) {
+      if (event.nativeEvent.isComposing) return;
+      event.preventDefault();
+      if (draft.trim() && !controllerRef.current) {
+        send(event);
+      }
+    }
+  };
+
   return <section className="grid gap-5 xl:grid-cols-[17rem_minmax(0,1fr)]">
     <aside className="overflow-hidden rounded-xl border border-white/[0.08] bg-[#111114] xl:sticky xl:top-24 xl:max-h-[calc(100vh-8rem)] xl:overflow-y-auto">
       <div className="flex items-center justify-between border-b border-white/[0.07] px-4 py-3"><div><h2 className="text-sm font-semibold text-white">Conversations</h2><p className="mt-0.5 text-xs text-zinc-500">Private project history</p></div><button type="button" onClick={beginNewConversation} disabled={Boolean(controllerRef.current)} className="grid h-8 w-8 place-items-center rounded-lg border border-sky-400/25 bg-sky-400/10 text-sky-200 hover:bg-sky-400/20 disabled:opacity-40" aria-label="New conversation"><Plus size={15} /></button></div>
@@ -246,7 +263,35 @@ export default function GroundedChatPanel({ api, userId, projectId, scenes, sele
         {(streamText || streamCitations.length > 0) && <article className="max-w-3xl rounded-xl border border-violet-400/20 bg-violet-400/[0.05] p-4"><div className="flex items-center gap-2 text-xs font-semibold text-violet-200"><Bot size={14} /> Generating grounded response</div>{streamText && <p className="mt-2 whitespace-pre-wrap text-sm leading-6 text-zinc-100">{streamText}</p>}<ScatteringMapFigure api={api} citations={streamCitations} onOpenPreview={onOpenPreview} /><CitationCards citations={streamCitations} onOpenPatch={onOpenPatch} onOpenPreview={onOpenPreview} onOpenScene={onOpenScene} /></article>}
         {error && <div className="rounded-lg border border-red-500/25 bg-red-500/[0.08] p-3 text-xs text-red-100"><div className="flex gap-2"><AlertTriangle size={15} className="shrink-0" />{error.message}</div></div>}
       </div>
-      <form onSubmit={send} className="border-t border-white/[0.07] p-4"><div className="grid gap-3 sm:grid-cols-[minmax(0,1fr)_auto]"><textarea value={draft} onChange={(event) => setDraft(event.target.value)} maxLength={1000} rows={3} placeholder="Ask about the authorized SAR evidence…" className="min-h-[5.5rem] w-full resize-y rounded-lg border border-white/[0.1] bg-black/20 px-3 py-2.5 text-sm text-white outline-none placeholder:text-zinc-600 focus:border-sky-400/55 focus:ring-2 focus:ring-sky-400/10" /><button type="submit" disabled={!draft.trim() || Boolean(controllerRef.current)} className="inline-flex items-center justify-center gap-2 self-end rounded-lg bg-sky-500 px-4 py-2.5 text-sm font-semibold text-white transition hover:bg-sky-400 disabled:cursor-not-allowed disabled:opacity-45"><Send size={15} /> Ask</button></div><div className="mt-3 flex flex-col gap-2 text-xs text-zinc-500 sm:flex-row sm:items-center sm:justify-between"><label className="flex items-center gap-2">Scope for a new conversation<select value={activeConversation?.scene_id || scopeSceneId} disabled={Boolean(activeConversation)} onChange={(event) => setScopeSceneId(event.target.value)} className="rounded-md border border-white/[0.1] bg-black/20 px-2 py-1 text-xs text-zinc-300 disabled:opacity-55"><option value="">Entire project</option>{readyScenes.map((scene) => <option key={scene.id} value={scene.id}>{scene.name}</option>)}</select></label><span>{activeConversation ? (activeConversation.scene_id ? 'This conversation is locked to its selected scene.' : 'This conversation searches the full project.') : 'Choose a scene to create a scene-scoped conversation.'}</span></div></form>
+      <form onSubmit={send} className="border-t border-white/[0.07] p-4">
+        <div className="grid gap-3 sm:grid-cols-[minmax(0,1fr)_auto]">
+          <div className="flex flex-col gap-1.5">
+            <textarea
+              value={draft}
+              onChange={(event) => setDraft(event.target.value)}
+              onKeyDown={handleKeyDown}
+              maxLength={1000}
+              rows={3}
+              placeholder="Ask about the authorized SAR evidence… (Press Enter to submit, Shift+Enter for new line)"
+              className="min-h-[5.5rem] w-full resize-y rounded-lg border border-white/[0.1] bg-black/20 px-3 py-2.5 text-sm text-white outline-none placeholder:text-zinc-600 focus:border-sky-400/55 focus:ring-2 focus:ring-sky-400/10"
+            />
+            <p className="text-[10px] text-zinc-500">
+              Press <kbd className="rounded border border-white/10 bg-white/[0.04] px-1 py-0.5 font-mono text-[9px] text-zinc-400">Enter</kbd> to ask &middot; <kbd className="rounded border border-white/10 bg-white/[0.04] px-1 py-0.5 font-mono text-[9px] text-zinc-400">Shift + Enter</kbd> for a new line
+            </p>
+          </div>
+          <button
+            type="submit"
+            disabled={!draft.trim() || Boolean(controllerRef.current)}
+            className="inline-flex items-center justify-center gap-2 self-start sm:self-end rounded-lg bg-sky-500 px-4 py-2.5 text-sm font-semibold text-white transition hover:bg-sky-400 disabled:cursor-not-allowed disabled:opacity-45"
+          >
+            <Send size={15} /> Ask
+          </button>
+        </div>
+        <div className="mt-3 flex flex-col gap-2 text-xs text-zinc-500 sm:flex-row sm:items-center sm:justify-between">
+          <label className="flex items-center gap-2">Scope for a new conversation<select value={activeConversation?.scene_id || scopeSceneId} disabled={Boolean(activeConversation)} onChange={(event) => setScopeSceneId(event.target.value)} className="rounded-md border border-white/[0.1] bg-black/20 px-2 py-1 text-xs text-zinc-300 disabled:opacity-55"><option value="">Entire project</option>{readyScenes.map((scene) => <option key={scene.id} value={scene.id}>{scene.name}</option>)}</select></label>
+          <span>{activeConversation ? (activeConversation.scene_id ? 'This conversation is locked to its selected scene.' : 'This conversation searches the full project.') : 'Choose a scene to create a scene-scoped conversation.'}</span>
+        </div>
+      </form>
     </div>
   </section>;
 }

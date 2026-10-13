@@ -558,9 +558,8 @@ export default function AoiMapPicker({ value, onChange, footprints, selectedId, 
                 type="button"
                 onClick={() => setBasemap(option.id)}
                 aria-pressed={basemap === option.id}
-                className={`rounded px-2 py-1 text-[11px] font-semibold transition ${
-                  basemap === option.id ? 'bg-white/[0.12] text-white' : 'text-zinc-400 hover:text-zinc-200'
-                }`}
+                className={`rounded px-2 py-1 text-[11px] font-semibold transition ${basemap === option.id ? 'bg-white/[0.12] text-white' : 'text-zinc-400 hover:text-zinc-200'
+                  }`}
               >
                 {option.label}
               </button>
