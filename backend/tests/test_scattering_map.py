@@ -20,7 +20,9 @@ from app.services.processing.scattering import (
     summarize_window,
 )
 from app.services.processing.scattering_map import (
+    MAX_RENDER_HEIGHT,
     MECHANISM_COLORS,
+    MIN_RENDER_WIDTH,
     NODATA_LABEL,
     MechanismMap,
     _majority_filter,
@@ -135,7 +137,46 @@ def test_render_produces_a_png_taller_than_the_grid() -> None:
     image = Image.open(io.BytesIO(png))
     # The legend is drawn below the raster, so the canvas must be taller than it.
     assert image.height > labels.shape[0]
-    assert image.width == labels.shape[1]
+    # An 80-cell map is enlarged by whole numbers, never left at 80 px, which is
+    # narrower than the legend text and stretched blurrily by the browser.
+    assert image.width >= MIN_RENDER_WIDTH
+    factor = image.width // labels.shape[1]
+    assert factor > 1
+
+
+def test_small_map_cells_are_enlarged_to_exact_squares() -> None:
+    labels = np.zeros((7, 12), dtype=np.uint8)
+    labels[:, 6:] = 1
+
+    from PIL import Image
+    import io
+
+    image = Image.open(io.BytesIO(render_mechanism_png(_map(labels)))).convert("RGB")
+    factor = MIN_RENDER_WIDTH // 12 + 1
+    assert image.width == max(MIN_RENDER_WIDTH, 12 * factor)
+    left = (image.width - 12 * factor) // 2
+    # Every pixel of one cell shares its colour, and the boundary between two
+    # classes falls on a cell edge: no interpolation, no invented colours.
+    assert image.getpixel((left, 0)) == image.getpixel((left + factor - 1, factor - 1))
+    assert image.getpixel((left + 6 * factor - 1, 0)) != image.getpixel((left + 6 * factor, 0))
+    assert {image.getpixel((left + 1, 1)), image.getpixel((left + 7 * factor, 1))} == {
+        MECHANISM_COLORS[MECHANISMS[0]],
+        MECHANISM_COLORS[MECHANISMS[1]],
+    }
+
+
+def test_tall_narrow_map_gets_a_canvas_wide_enough_for_its_legend() -> None:
+    labels = np.zeros((900, 6), dtype=np.uint8)
+
+    from PIL import Image
+    import io
+
+    image = Image.open(io.BytesIO(render_mechanism_png(_map(labels))))
+    # Enlarging to MIN_RENDER_WIDTH would make this map thousands of rows tall;
+    # the enlargement is capped, so the canvas is padded instead of the legend
+    # being clipped.
+    assert image.width >= MIN_RENDER_WIDTH
+    assert image.height < 2 * MAX_RENDER_HEIGHT
 
 
 def test_render_survives_an_all_nodata_grid() -> None:

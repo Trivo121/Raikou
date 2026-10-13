@@ -75,7 +75,10 @@ function ScatteringMapFigure({ api, citations, onOpenPreview }) {
             key={`${artifactId}-${grantAttempt}`}
             src={url}
             alt="Scattering mechanism map of the scene"
-            className="block w-full bg-[#121214]"
+            // The whole picture, legend included, stays on screen: height is capped
+            // and the image is contained rather than cropped. Its backdrop matches
+            // the canvas colour, so any spare width is invisible.
+            className="mx-auto block h-auto max-h-[70vh] w-full bg-[#121214] object-contain"
             loading="lazy"
             // A grant that expired between issue and load leaves a broken image
             // over a file that is perfectly intact. Mint a new one instead, once

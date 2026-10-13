@@ -60,6 +60,16 @@ logger = logging.getLogger(__name__)
 NODATA_LABEL = 255
 
 DEFAULT_TARGET_WIDTH = 4096
+# A small area of interest gives a map only ~100 cells across. The legend is made
+# of sentences, so on a canvas that narrow every entry ran off the right edge,
+# and the browser then stretched the ~120 px file to fill the page. Maps are
+# therefore enlarged to at least this width, by whole numbers so that each 60 m
+# cell stays an exact square and nothing is interpolated, and the canvas is
+# never narrower than this.
+MIN_RENDER_WIDTH = 1000
+# Bounds the enlargement of a tall, narrow map, where the factor needed to reach
+# MIN_RENDER_WIDTH would otherwise produce an enormous image.
+MAX_RENDER_HEIGHT = 4096
 # Rows are read in multiples of the block factor so no block straddles a tile.
 TILE_BLOCK_ROWS = 32
 
@@ -331,8 +341,17 @@ def render_mechanism_png(
         scale = max_width / width
         image = image.resize((max_width, max(1, int(height * scale))), Image.NEAREST)
         width, height = image.size
+    elif width < MIN_RENDER_WIDTH:
+        factor = min(-(-MIN_RENDER_WIDTH // width), max(1, MAX_RENDER_HEIGHT // height))
+        if factor > 1:
+            image = image.resize((width * factor, height * factor), Image.NEAREST)
+            width, height = image.size
 
-    swatch = max(14, width // 90)
+    # The canvas, not the map, sets the legend's size and room. A tall narrow map
+    # can still be narrower than MIN_RENDER_WIDTH after enlargement; it is then
+    # centred on a canvas wide enough for the legend.
+    canvas_width = max(width, MIN_RENDER_WIDTH)
+    swatch = max(14, canvas_width // 90)
     padding = swatch
     line_height = swatch + padding // 2
     label_font = _load_font(max(11, swatch - 2))
@@ -349,13 +368,13 @@ def render_mechanism_png(
     ]
 
     columns, rows, column_width = legend_layout(
-        width, swatch, padding, label_font, [text for _, text in entries]
+        canvas_width, swatch, padding, label_font, [text for _, text in entries]
     )
 
     legend_height = padding * 2 + rows * line_height + swatch * 2
 
-    canvas = Image.new("RGBA", (width, height + legend_height), (18, 18, 20, 255))
-    canvas.alpha_composite(image, (0, 0))
+    canvas = Image.new("RGBA", (canvas_width, height + legend_height), (18, 18, 20, 255))
+    canvas.alpha_composite(image, ((canvas_width - width) // 2, 0))
 
     draw = ImageDraw.Draw(canvas)
 
