@@ -846,7 +846,7 @@ class M3Pipeline:
         return {"patch_count": patch_count, "preview_count": preview_count}
 
     def _embed_patches(self, task: dict[str, Any]) -> dict[str, Any]:
-        vrt_path, metadata, _ = self._prepare_vrt(task)
+        vrt_path, metadata, artifacts = self._prepare_vrt(task)
         manifest = self._workdir(task) / "embeddings.ndjson.gz"
         SARCLIPEncoder.load_singleton()
         encoded_count = 0

@@ -63,8 +63,11 @@ log "5/8 Sync new backend code (preserving .env and sessions/)"
 # -- vLLM then recreated an empty root-owned mount point at the next boot, so
 # nothing pointed at the loss until the weights were looked for. sessions/ is
 # excluded for the same reason. Add to this list, never remove from it.
+# The leading slash anchors each pattern to the top of backend/. Unanchored,
+# 'models' also matched the code packages app/models and app/services/models,
+# so those silently kept whatever an older deploy had left there.
 rsync -a --delete \
-  --exclude '.env' --exclude 'sessions' --exclude 'models' \
+  --exclude '/.env' --exclude '/sessions' --exclude '/models' \
   --exclude '__pycache__' --exclude '*.pyc' \
   "$SRC_DIR/backend/" "$APP_DIR/"
 
