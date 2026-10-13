@@ -620,7 +620,11 @@ def download_product_to(
     """
     safe_id = _safe_product_id(product_id)
     token = access_token()
-    url = f"{settings.COPERNICUS_DOWNLOAD_URL}/Products('{safe_id}')/$value"
+    # Unquoted, like the catalogue lookup above. The download service answers
+    # Products('<uuid>') with 422 "Invalid uuid as ID parameter" (DAT-ZIP-111),
+    # which failed every whole-frame fetch; checked against the live service on
+    # 2026-10-13.
+    url = f"{settings.COPERNICUS_DOWNLOAD_URL}/Products({safe_id})/$value"
     written = 0
     resumes = 0
     refreshed_auth = False

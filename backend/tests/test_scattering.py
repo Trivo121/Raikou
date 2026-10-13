@@ -98,6 +98,42 @@ def test_water_is_tested_before_bare_ground() -> None:
     assert classify_window(bare, THRESHOLDS) == "rough_surface"
 
 
+def test_dark_window_with_noise_limited_vh_is_water_not_canopy() -> None:
+    # Calm sea: VV dark, VH at the receiver floor, so the ratio is noise over VV
+    # (-7 dB here) and the RVI is high. Before NOISE_LIMITED_VH_DB this was
+    # labelled "vegetation canopy"; on a real coastal subset that turned 78% of
+    # the scene into forest.
+    calm_sea = summarize_window(*_flat(-20.0, -27.0))
+    assert calm_sea.radar_vegetation_index >= THRESHOLDS.volume_min_rvi
+    assert classify_window(calm_sea, THRESHOLDS) == "smooth_surface"
+
+
+def test_noise_limited_rule_leaves_bright_and_measurable_windows_alone() -> None:
+    # A real canopy is far above the VH floor and keeps its label.
+    assert classify_window(summarize_window(*_flat(-10.0, -17.0)), THRESHOLDS) == "volume"
+    # VV above the water level is never re-labelled by a weak VH: the rule only
+    # resolves windows that are already dark in VV.
+    assert classify_window(summarize_window(*_flat(-13.0, -25.0)), THRESHOLDS) == "rough_surface"
+    # Dark in VV but with VH clearly above the floor: the ratio is a real
+    # measurement, so it still decides.
+    assert classify_window(summarize_window(*_flat(-16.0, -21.0)), THRESHOLDS) == "volume"
+    # Dark, weak VH, but not depolarised enough to be called volume: the old
+    # rules said rough and still do. The fix only removes false canopies.
+    assert classify_window(summarize_window(*_flat(-16.0, -24.5)), THRESHOLDS) == "rough_surface"
+
+
+def test_weak_vh_is_not_volume_even_when_vv_is_not_dark() -> None:
+    # Depolarised-looking only because VH is at the floor, but brighter than a
+    # calm-sea water level such as the -17.3 dB fitted on the Visakhapatnam
+    # subset: no canopy and no water, so the general class.
+    from dataclasses import replace
+
+    thresholds = replace(THRESHOLDS, water_max_vv_db=-18.0)
+    window = summarize_window(*_flat(-16.5, -24.4))
+    assert window.radar_vegetation_index >= thresholds.volume_min_rvi
+    assert classify_window(window, thresholds) == "rough_surface"
+
+
 def test_block_reports_shares_and_carries_its_limits() -> None:
     windows = (
         [summarize_window(*_flat(-22.0, -34.0)) for _ in range(2)]

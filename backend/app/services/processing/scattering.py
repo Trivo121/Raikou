@@ -118,6 +118,7 @@ class ScatteringThresholds:
             "urban_min_vv_db": self.urban_min_vv_db,
             "urban_max_ratio_db": self.urban_max_ratio_db,
             "volume_min_rvi": self.volume_min_rvi,
+            "volume_min_vh_db": NOISE_LIMITED_VH_DB,
             "source": self.source,
         }
         if self.degenerate_reason:
@@ -260,6 +261,18 @@ def _fallback_thresholds(reason: str) -> ScatteringThresholds:
     )
 
 
+# A canopy has to return a measurable cross-pol signal, so volume scattering
+# needs VH above this level. Over calm water VH stays near the receiver noise
+# floor even after noise subtraction (Sentinel-1 IW: roughly -25 to -28 dB in
+# VH), so a dark window's ratio is noise divided by VV and can come out high
+# enough to pass the RVI test. It did: on a calm-sea subset of the Visakhapatnam
+# coast, open water was mapped 78% "vegetation canopy" while the brightness
+# heuristic said 71% water. C-band canopies return roughly -11 to -22 dB in VH.
+# A window that only looks depolarised because its VH is at the floor is a
+# smooth surface if it is dark in VV, and rough otherwise. Windows the RVI test
+# would not have called volume are left exactly as before.
+NOISE_LIMITED_VH_DB = -24.0
+
 MECHANISMS = ("smooth_surface", "double_bounce", "volume", "rough_surface")
 
 MECHANISM_DESCRIPTIONS = {
@@ -276,6 +289,9 @@ def classify_window(window: WindowScattering, thresholds: ScatteringThresholds) 
     Order matters: the two specific mechanisms are tested before the two general
     ones, because a smooth water surface and a bare field both have low RVI and
     only the absolute level separates them.
+
+    Volume also needs a measurable VH (``NOISE_LIMITED_VH_DB``): a high RVI built
+    on a VH at the noise floor is noise over VV, not depolarisation.
     """
     if (
         window.vv_db <= thresholds.water_max_vv_db
@@ -288,7 +304,10 @@ def classify_window(window: WindowScattering, thresholds: ScatteringThresholds) 
     ):
         return "double_bounce"
     if window.radar_vegetation_index >= thresholds.volume_min_rvi:
-        return "volume"
+        if window.vh_db > NOISE_LIMITED_VH_DB:
+            return "volume"
+        if window.vv_db <= thresholds.water_max_vv_db:
+            return "smooth_surface"
     return "rough_surface"
 
 

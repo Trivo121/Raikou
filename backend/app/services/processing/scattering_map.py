@@ -48,6 +48,7 @@ TARGET_GROUND_SAMPLING_M = 60.0
 from app.services.processing.scattering import (
     MECHANISM_DESCRIPTIONS,
     MECHANISMS,
+    NOISE_LIMITED_VH_DB,
     ScatteringThresholds,
 )
 
@@ -235,13 +236,19 @@ def compute_mechanism_map(
         vv_mean = np.where(usable, vv_sum / np.maximum(valid_sum, 1.0), np.nan)
         vh_mean = np.where(usable, vh_sum / np.maximum(valid_sum, 1.0), np.nan)
         vv_db = 10.0 * np.log10(np.maximum(vv_mean, 1e-12))
+        vh_db = 10.0 * np.log10(np.maximum(vh_mean, 1e-12))
         ratio_db = 10.0 * np.log10(np.maximum(vh_mean, 1e-12) / np.maximum(vv_mean, 1e-12))
         rvi = 4.0 * vh_mean / np.maximum(vv_mean + vh_mean, 1e-12)
 
     # Same precedence as classify_window: water beats double-bounce beats volume.
     # Assigning in reverse order lets the higher-priority rule overwrite.
     labels = np.full(vv_db.shape, MECHANISMS.index("rough_surface"), dtype=np.uint8)
-    labels[rvi >= thresholds.volume_min_rvi] = MECHANISMS.index("volume")
+    depolarised = rvi >= thresholds.volume_min_rvi
+    labels[depolarised & (vh_db > NOISE_LIMITED_VH_DB)] = MECHANISMS.index("volume")
+    # High RVI on a VH at the noise floor is noise over VV, not a canopy.
+    labels[
+        depolarised & (vh_db <= NOISE_LIMITED_VH_DB) & (vv_db <= thresholds.water_max_vv_db)
+    ] = MECHANISMS.index("smooth_surface")
     labels[
         (vv_db >= thresholds.urban_min_vv_db) & (ratio_db <= thresholds.urban_max_ratio_db)
     ] = MECHANISMS.index("double_bounce")
