@@ -1,4 +1,4 @@
-import { useMemo, useRef, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import { useQuery, useQueryClient } from '@tanstack/react-query';
 import { AlertTriangle, Bot, FileImage, Layers, LoaderCircle, MessageSquare, Plus, Send, ShieldCheck } from 'lucide-react';
 
