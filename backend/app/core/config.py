@@ -297,6 +297,35 @@ class Settings(BaseSettings):
     LAND_COVER_DEVICE: str | None = None
     LAND_COVER_ENABLED: bool = True
 
+    # Optical: Sentinel-2 land cover from the OlmoEarth India model. Off until
+    # the optical worker, its venv and the release are in place on the box; when
+    # off, /optical reports itself unavailable and nothing else changes.
+    OPTICAL_ENABLED: bool = False
+    # Hard caps on one side of the drawn box. The Process API renders at most
+    # 2500 px (25 km at 10 m) a side, and snapping the grid to 60 m and rounding
+    # to 8 px can add up to 140 m, so 24.8 km is the largest box that always
+    # fits. A seasonal stack fetches up to three dates, so it gets a smaller
+    # box for a similar processing-unit cost.
+    OPTICAL_MAX_SIDE_KM_SINGLE: float = Field(default=24.0, gt=0, le=24.8)
+    OPTICAL_MAX_SIDE_KM_STACK: float = Field(default=15.0, gt=0, le=24.8)
+    # The model reads 128 px windows; a smaller box has nothing to tile.
+    OPTICAL_MIN_SIDE_PX: int = Field(default=128, ge=128, le=2500)
+    OPTICAL_DEFAULT_MAX_CLOUD: float = Field(default=20.0, ge=0, le=100)
+    OPTICAL_MAX_SEARCH_DAYS: int = Field(default=400, ge=1, le=3660)
+    OPTICAL_MAX_SEARCH_RESULTS: int = Field(default=60, ge=1, le=200)
+    # Sentinel Hub gives a Copernicus General account 10,000 PU a month, shared
+    # with SAR subsets. New optical runs are refused once either cap would be
+    # passed, so the SAR path always keeps the rest.
+    OPTICAL_PU_BUDGET_PER_USER_MONTH: float = Field(default=500.0, ge=0)
+    OPTICAL_PU_GLOBAL_MONTH_CAP: float = Field(default=6000.0, ge=0)
+    # The Phase 0 release: weights, model card, base config and the exact
+    # raikou_phase0 code it was trained and exported with. Lives under models/,
+    # which the deploy rsync never touches.
+    OLMOEARTH_LULC_RELEASE_DIR: str = "/home/ubuntu/backend/models/olmoearth_india_v1_2"
+    OLMOEARTH_LULC_WEIGHTS: str = "olmoearth_india_lulc_fp16.pt"
+    OLMOEARTH_LULC_AMP: Literal["fp16", "fp32"] = "fp16"
+    OLMOEARTH_LULC_DEVICE: str | None = None
+
     model_config = SettingsConfigDict(
         env_file=".env",
         env_file_encoding="utf-8",

@@ -1,0 +1,23 @@
+[Unit]
+Description=Raikou optical (OlmoEarth land-cover) worker for CUDA device %i
+After=network-online.target raikou-outbox-dispatcher.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=ubuntu
+WorkingDirectory=/home/ubuntu/backend
+EnvironmentFile=-/home/ubuntu/backend/.env
+Environment=PYTHONUNBUFFERED=1
+Environment=ENVIRONMENT=production
+# Like the GPU unit, the instance number is the CUDA device index.
+Environment=CUDA_VISIBLE_DEVICES=%i
+Environment=M3_GPU_INFERENCE_CONCURRENCY=1
+# Its own venv (deployment/optical/setup_optical_env.sh): torch + the OlmoEarth
+# loader + the GIS stack, never installed into sar_env.
+ExecStart=/home/ubuntu/olmoearth_env/bin/python -m app.workers.runner --class optical
+Restart=always
+RestartSec=10
+
+[Install]
+WantedBy=multi-user.target

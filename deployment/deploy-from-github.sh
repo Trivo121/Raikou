@@ -112,6 +112,12 @@ files = [
     # loop below commits each file separately, which is what makes this legal.
     "20260724000000_m7_acquisition_stage_enum.sql",
     "20260724001000_m7_scene_acquisitions.sql",
+    # M8 is re-runnable (add-if-missing, create-or-replace) and M9 builds on its
+    # subset columns, so it is listed here to make a fresh box self-sufficient.
+    "20260725000000_m8_acquisition_subset_mode.sql",
+    # M9 part 1 adds the 'optical' execution class; part 2 must commit after it.
+    "20261016000000_m9_optical_execution_class.sql",
+    "20261016001000_m9_optical_acquisitions.sql",
 ]
 mig_dir = pathlib.Path(src) / "supabase" / "migrations"
 with psycopg.connect(dsn) as conn:
@@ -145,7 +151,9 @@ sudo systemctl restart sarchat-vllm \
 # (the unit sets CUDA_VISIBLE_DEVICES=%i), NOT a worker sequence number as it is
 # for the CPU unit. Restarting @1 on a single-GPU box starts a worker that sees
 # zero GPUs and fails every task it claims with "No CUDA GPUs are available".
-for unit in raikou-outbox-dispatcher raikou-worker-cpu@1 raikou-worker-gpu@0; do
+# raikou-worker-optical@0 runs the OlmoEarth land-cover stage from its own venv
+# (~/olmoearth_env); like the GPU unit, its instance number is the CUDA index.
+for unit in raikou-outbox-dispatcher raikou-worker-cpu@1 raikou-worker-gpu@0 raikou-worker-optical@0; do
   sudo systemctl restart "$unit" 2>/dev/null && echo "restarted $unit" || true
 done
 sudo systemctl start sar-backend

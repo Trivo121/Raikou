@@ -166,7 +166,9 @@ class SceneAcquisitionRead(BaseModel):
     product_id: str
     product_name: str
     product_type: str
-    polarisation_channels: str
+    # Null for Sentinel-2 (optical) acquisitions, which have no polarisation.
+    polarisation_channels: str | None = None
+    collection: str = "SENTINEL-1"
     sensing_start: datetime | None = None
     online: bool
     expected_size_bytes: int

@@ -41,7 +41,42 @@ Other areas and dates: `--lon 77.59 --lat 12.97 --name bengaluru --window 2026-0
 
 Re-running is cheap: the venv is reused and the setup steps are skipped. The report is saved next to the outputs as `smoke_report.json`.
 
+## Running the optical worker
+
+The land-cover stage runs as `python -m app.workers.runner --class optical` from this venv. The venv therefore also needs the backend's API-level packages, which `requirements-optical.txt` pulls in from `backend/requirements-api.txt`.
+
+After a deploy that changes either requirements file, re-run the setup script. Without `--cdse` it spends no processing units:
+
+```bash
+bash ~/raikou-src/deployment/optical/setup_optical_env.sh
+```
+
+Install and start the worker once. `deploy-from-github.sh` restarts it on every deploy after that:
+
+```bash
+sudo cp ~/raikou-src/deployment/raikou-worker-optical@.service /etc/systemd/system/
+sudo systemctl daemon-reload
+sudo systemctl enable --now raikou-worker-optical@0
+```
+
+Then set `OPTICAL_ENABLED=true` in `~/backend/.env` and restart the API:
+
+```bash
+sudo systemctl restart sar-backend
+```
+
+`GET /api/v1/optical/providers` reports `enabled: true` once these are all in place:
+- the m9 migrations;
+- the release;
+- the Copernicus credentials.
+
+Otherwise its `reason` says which one is missing.
+
 To remove everything:
+
+```bash
+sudo systemctl disable --now raikou-worker-optical@0
+```
 
 ```bash
 rm -rf ~/olmoearth_env ~/optical_smoke /tmp/uvenv

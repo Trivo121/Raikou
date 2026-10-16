@@ -17,10 +17,15 @@ def processing_job_stream_key() -> str:
     return f"{settings.REDIS_KEY_PREFIX}:queue:processing"
 
 
+# 'optical' runs the OlmoEarth land-cover stage in its own venv and process,
+# so the SAR GPU worker never has to import the optical model stack.
+EXECUTION_CLASSES = frozenset({"cpu", "gpu", "optical"})
+
+
 def processing_task_stream_key(execution_class: str) -> str:
     """Return the M3 stream for one execution class, never a cache key."""
-    if execution_class not in {"cpu", "gpu"}:
-        raise ValueError("M3 execution_class must be 'cpu' or 'gpu'.")
+    if execution_class not in EXECUTION_CLASSES:
+        raise ValueError("M3 execution_class must be 'cpu', 'gpu' or 'optical'.")
     return f"{settings.REDIS_KEY_PREFIX}:stream:processing:{execution_class}"
 
 

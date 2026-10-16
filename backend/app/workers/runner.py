@@ -1,4 +1,4 @@
-"""Redis Stream consumers for durable M3 CPU and GPU tasks."""
+"""Redis Stream consumers for durable M3 CPU, GPU and optical tasks."""
 
 from __future__ import annotations
 
@@ -17,7 +17,7 @@ from redis.exceptions import ResponseError
 
 from app.core.config import settings
 from app.services.cache.redis import get_redis_stream_client
-from app.services.jobs.publisher import processing_task_stream_key
+from app.services.jobs.publisher import EXECUTION_CLASSES, processing_task_stream_key
 from app.workers.repository import RetryableTaskError, UserFacingTaskError, WorkerRepository
 from app.workers.stages import M3Pipeline
 
@@ -37,8 +37,8 @@ class M3Worker:
         repository: WorkerRepository | None = None,
         worker_id: str | None = None,
     ) -> None:
-        if execution_class not in {"cpu", "gpu"}:
-            raise ValueError("execution_class must be 'cpu' or 'gpu'.")
+        if execution_class not in EXECUTION_CLASSES:
+            raise ValueError("execution_class must be 'cpu', 'gpu' or 'optical'.")
         self.execution_class = execution_class
         self.repository = repository or WorkerRepository()
         self.worker_id = worker_id or f"{execution_class}:{socket.gethostname()}:{uuid4().hex[:8]}"
@@ -134,7 +134,7 @@ class M3Worker:
                 result = self.pipeline.cleanup_cancelled_job(task)
                 self.repository.cancel_task_after_cleanup(task, worker_id=self.worker_id, detail=result)
                 settled = True
-            elif self.execution_class == "gpu":
+            elif self.execution_class in {"gpu", "optical"}:
                 # This semaphore is the final per-process guard even if a
                 # future runner adds concurrent stream handling.
                 with self._gpu_semaphore:
@@ -186,7 +186,7 @@ class M3Worker:
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="Run a Raikou M3 worker")
-    parser.add_argument("--class", dest="execution_class", choices=("cpu", "gpu"), required=True)
+    parser.add_argument("--class", dest="execution_class", choices=sorted(EXECUTION_CLASSES), required=True)
     parser.add_argument("--once", action="store_true", help="consume/reclaim one available task batch and exit")
     args = parser.parse_args()
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s %(message)s")

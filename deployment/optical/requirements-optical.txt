@@ -1,6 +1,10 @@
 # Optical (OlmoEarth LULC) runtime for the g4dn box.
 # Lives in its own venv (~/olmoearth_env, Python 3.12), never in sar_env:
 # the SAR stack (SARCLIP / open_clip / timm) keeps its own torch.
+#
+# The optical worker runs `python -m app.workers.runner --class optical`, so it
+# also needs the backend's API-level dependencies (no torch/open_clip in there).
+-r ../../backend/requirements-api.txt
 torch>=2.7,<2.11
 olmoearth-pretrain-minimal==0.1.2
 numpy>=1.26,<3

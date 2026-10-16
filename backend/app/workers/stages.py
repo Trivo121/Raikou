@@ -33,7 +33,6 @@ from app.services.acquisitions import copernicus
 from app.services.cache.evidence import invalidate_project_evidence_cache_sync
 from app.services.ingestion.calibration import load_calibration_luts, load_noise_luts
 from app.services.ingestion.file_ingestion import _build_vrt, _build_vrt_local, extract_metadata
-from app.services.models.sarclip_encoder import EncodedPatch, ProgressUpdate, SARCLIPEncoder, encode_patch_stream
 from app.services.processing.patch_pipeline import PATCH_SIZE, _build_channels, extract_and_preprocess_patches
 from app.services.processing.radiometry import SIGMA0_LINEAR
 from app.services.processing.scene_record import build_scene_record
@@ -45,6 +44,8 @@ from app.services.uploads.validation import (
 )
 from app.services.storage.payloads import QdrantPatchPayload
 from app.services.storage.qdrant import QdrantStore
+from app.workers import optical_stages
+from app.workers.optical_stages import OpticalStagesMixin
 from app.workers.repository import RetryableTaskError, UserFacingTaskError, WorkerRepository
 
 
@@ -221,7 +222,7 @@ class _FetchHeartbeat:
         self._events_emitted += 1
 
 
-class M3Pipeline:
+class M3Pipeline(OpticalStagesMixin):
     def __init__(self, repository: WorkerRepository, storage: ObjectStorage | None = None) -> None:
         self.repository = repository
         self.storage = storage or get_object_storage()
@@ -235,18 +236,11 @@ class M3Pipeline:
                 owner_id=str(task["owner_id"]), project_id=str(task["project_id"])
             )
             return StageResult(result, None, _PROGRESS[stage])
-        handlers = {
-            "fetch_source": self._fetch_source,
-            "validate_upload": self._validate_upload,
-            "extract_metadata": self._extract_metadata,
-            "build_vrt": self._build_vrt,
-            "build_overview": self._build_overview,
-            "tile_patches": self._tile_patches,
-            "embed_patches": self._embed_patches,
-            "index_vectors": self._index_vectors,
-            "build_evidence": self._build_evidence,
-            "finalize": self._finalize,
-        }
+        if self._pipeline(task) == optical_stages.PIPELINE:
+            handlers = self.optical_handlers()
+            next_stages, progress = optical_stages.NEXT_STAGE, optical_stages.PROGRESS
+        else:
+            handlers, next_stages, progress = self._sar_handlers(), _NEXT_STAGE, _PROGRESS
         try:
             handler = handlers[stage]
         except KeyError as exc:
@@ -259,7 +253,32 @@ class M3Pipeline:
         invalidate_project_evidence_cache_sync(
             owner_id=str(task["owner_id"]), project_id=str(task["project_id"])
         )
-        return StageResult(result, _NEXT_STAGE[stage], _PROGRESS[stage])
+        return StageResult(result, next_stages[stage], progress[stage])
+
+    def _pipeline(self, task: dict[str, Any]) -> str:
+        """Which stage sequence this scene runs: 'optical' or the SAR default.
+
+        Read from the scene on every task rather than the task payload, because
+        complete_task enqueues each next stage with an empty payload.
+        """
+        metadata = self.repository.scene(task).get("metadata")
+        if isinstance(metadata, dict) and metadata.get("pipeline") == optical_stages.PIPELINE:
+            return optical_stages.PIPELINE
+        return "sar"
+
+    def _sar_handlers(self) -> dict[str, Any]:
+        return {
+            "fetch_source": self._fetch_source,
+            "validate_upload": self._validate_upload,
+            "extract_metadata": self._extract_metadata,
+            "build_vrt": self._build_vrt,
+            "build_overview": self._build_overview,
+            "tile_patches": self._tile_patches,
+            "embed_patches": self._embed_patches,
+            "index_vectors": self._index_vectors,
+            "build_evidence": self._build_evidence,
+            "finalize": self._finalize,
+        }
 
     def cleanup_cancelled_job(self, task: dict[str, Any]) -> dict[str, Any]:
         """Remove only derived outputs for a cancelled processing job."""
@@ -846,6 +865,15 @@ class M3Pipeline:
         return {"patch_count": patch_count, "preview_count": preview_count}
 
     def _embed_patches(self, task: dict[str, Any]) -> dict[str, Any]:
+        # Imported here, not at module top: it pulls torch and open_clip, and the
+        # optical worker imports this module from a venv that has neither.
+        from app.services.models.sarclip_encoder import (
+            EncodedPatch,
+            ProgressUpdate,
+            SARCLIPEncoder,
+            encode_patch_stream,
+        )
+
         vrt_path, metadata, artifacts = self._prepare_vrt(task)
         manifest = self._workdir(task) / "embeddings.ndjson.gz"
         SARCLIPEncoder.load_singleton()

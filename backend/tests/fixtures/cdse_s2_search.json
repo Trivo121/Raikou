@@ -1,0 +1,65 @@
+{
+  "@odata.context": "$metadata#Products(Attributes())",
+  "value": [
+    {
+      "@odata.mediaContentType": "application/octet-stream",
+      "Id": "6f1c3d2a-0b4e-4c55-9a1d-2b3c4d5e6f70",
+      "Name": "S2B_MSIL2A_20260412T050649_N0511_R019_T44QQE_20260412T081233.SAFE",
+      "ContentType": "application/octet-stream",
+      "ContentLength": 1093742311,
+      "Online": true,
+      "ContentDate": {"Start": "2026-04-12T05:06:49.024Z", "End": "2026-04-12T05:06:49.024Z"},
+      "GeoFootprint": {"type": "Polygon", "coordinates": [[[82.90, 17.10], [83.95, 17.10], [83.95, 18.10], [82.90, 18.10], [82.90, 17.10]]]},
+      "Attributes": [
+        {"@odata.type": "#OData.CSC.DoubleAttribute", "Name": "cloudCover", "Value": 3.21, "ValueType": "Double"},
+        {"@odata.type": "#OData.CSC.StringAttribute", "Name": "productType", "Value": "S2MSI2A", "ValueType": "String"},
+        {"@odata.type": "#OData.CSC.StringAttribute", "Name": "tileId", "Value": "44QQE", "ValueType": "String"},
+        {"@odata.type": "#OData.CSC.StringAttribute", "Name": "platformSerialIdentifier", "Value": "B", "ValueType": "String"},
+        {"@odata.type": "#OData.CSC.IntegerAttribute", "Name": "relativeOrbitNumber", "Value": 19, "ValueType": "Integer"},
+        {"@odata.type": "#OData.CSC.StringAttribute", "Name": "processingBaseline", "Value": "05.11", "ValueType": "String"}
+      ]
+    },
+    {
+      "@odata.mediaContentType": "application/octet-stream",
+      "Id": "6f1c3d2a-0b4e-4c55-9a1d-2b3c4d5e6f71",
+      "Name": "S2B_MSIL2A_20260412T050649_N0500_R019_T44QQE_20260412T070011.SAFE",
+      "ContentType": "application/octet-stream",
+      "ContentLength": 1090000000,
+      "Online": true,
+      "ContentDate": {"Start": "2026-04-12T05:06:49.024Z", "End": "2026-04-12T05:06:49.024Z"},
+      "GeoFootprint": {"type": "Polygon", "coordinates": [[[82.90, 17.10], [83.95, 17.10], [83.95, 18.10], [82.90, 18.10], [82.90, 17.10]]]},
+      "Attributes": [
+        {"@odata.type": "#OData.CSC.DoubleAttribute", "Name": "cloudCover", "Value": 3.30, "ValueType": "Double"},
+        {"@odata.type": "#OData.CSC.StringAttribute", "Name": "productType", "Value": "S2MSI2A", "ValueType": "String"},
+        {"@odata.type": "#OData.CSC.StringAttribute", "Name": "tileId", "Value": "44QQE", "ValueType": "String"},
+        {"@odata.type": "#OData.CSC.StringAttribute", "Name": "platformSerialIdentifier", "Value": "B", "ValueType": "String"},
+        {"@odata.type": "#OData.CSC.StringAttribute", "Name": "processingBaseline", "Value": "05.00", "ValueType": "String"}
+      ]
+    },
+    {
+      "@odata.mediaContentType": "application/octet-stream",
+      "Id": "6f1c3d2a-0b4e-4c55-9a1d-2b3c4d5e6f72",
+      "Name": "S2C_MSIL2A_20260407T050701_N0511_R119_T44QQE_20260407T090122.SAFE",
+      "ContentType": "application/octet-stream",
+      "ContentLength": 1101000000,
+      "Online": true,
+      "ContentDate": {"Start": "2026-04-07T05:07:01.024Z", "End": "2026-04-07T05:07:01.024Z"},
+      "GeoFootprint": {"type": "Polygon", "coordinates": [[[83.30, 17.10], [83.95, 17.10], [83.95, 18.10], [83.30, 18.10], [83.30, 17.10]]]},
+      "Attributes": [
+        {"@odata.type": "#OData.CSC.DoubleAttribute", "Name": "cloudCover", "Value": 11.9, "ValueType": "Double"},
+        {"@odata.type": "#OData.CSC.StringAttribute", "Name": "productType", "Value": "S2MSI2A", "ValueType": "String"},
+        {"@odata.type": "#OData.CSC.StringAttribute", "Name": "platformSerialIdentifier", "Value": "C", "ValueType": "String"}
+      ]
+    },
+    {
+      "@odata.mediaContentType": "application/octet-stream",
+      "Id": "6f1c3d2a-0b4e-4c55-9a1d-2b3c4d5e6f73",
+      "Name": "S1D_IW_GRDH_1SDV_20260411T003057_20260411T003122_000001_000002_ABCD.SAFE",
+      "ContentType": "application/octet-stream",
+      "ContentLength": 1700000000,
+      "Online": true,
+      "ContentDate": {"Start": "2026-04-11T00:30:57.000Z", "End": "2026-04-11T00:31:22.000Z"},
+      "Attributes": []
+    }
+  ]
+}

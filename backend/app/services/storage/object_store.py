@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import base64
 import os
+import re
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, replace
 from functools import lru_cache
@@ -112,7 +113,7 @@ class ObjectStorage(Protocol):
     ) -> str:
         """Return a short-lived PUT URL for exactly one multipart part."""
 
-    def presign_download(self, key: str, expires_in_seconds: int) -> str:
+    def presign_download(self, key: str, expires_in_seconds: int, *, download_filename: str | None = None) -> str:
         """Return a short-lived GET URL for one already-authorized object."""
 
     def complete_multipart_upload(
@@ -490,9 +491,18 @@ class S3ObjectStorage:
         except (BotoCoreError, ClientError) as exc:
             raise self._storage_error("presign multipart upload part", key, exc) from exc
 
-    def presign_download(self, key: str, expires_in_seconds: int) -> str:
-        """Sign one inline object read without making the bucket public."""
+    def presign_download(self, key: str, expires_in_seconds: int, *, download_filename: str | None = None) -> str:
+        """Sign one object read without making the bucket public.
+
+        Inline by default (previews). ``download_filename`` turns it into an
+        attachment; the name is reduced to a safe ASCII set here, so no caller
+        string reaches the response header as-is.
+        """
         key = _validate_object_key(key)
+        disposition = "inline"
+        if download_filename is not None:
+            safe = re.sub(r"[^A-Za-z0-9._-]+", "_", download_filename).strip("._") or "download"
+            disposition = f'attachment; filename="{safe[:150]}"'
         if isinstance(expires_in_seconds, bool) or not isinstance(expires_in_seconds, int):
             raise ValueError("Signed URL expiry must be an integer number of seconds.")
         if not 1 <= expires_in_seconds <= settings.STORAGE_SIGNED_URL_TTL_SECONDS:
@@ -505,9 +515,9 @@ class S3ObjectStorage:
                 Params={
                     "Bucket": self._bucket,
                     "Key": key,
-                    # Never let a preview request turn into a browser download
-                    # with a user-controlled filename.
-                    "ResponseContentDisposition": "inline",
+                    # A preview never becomes a download, and a download name
+                    # is sanitized above, never a raw user string.
+                    "ResponseContentDisposition": disposition,
                 },
                 ExpiresIn=expires_in_seconds,
                 HttpMethod="GET",

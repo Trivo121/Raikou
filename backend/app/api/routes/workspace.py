@@ -600,6 +600,60 @@ async def create_artifact_preview(
     )
 
 
+# Files a user may save: optical GIS bundle files and rasters, their own
+# sources, overviews, evidence images and records. Never another tenant's (the
+# artifact is resolved through ownership first).
+_DOWNLOADABLE_KINDS = {"source_raster", "overview", "evidence", "scene_record", "other"}
+
+
+def _download_filename(artifact: dict) -> str:
+    metadata = artifact.get("metadata") if isinstance(artifact.get("metadata"), dict) else {}
+    name = metadata.get("filename") if isinstance(metadata.get("filename"), str) else None
+    return name or str(artifact.get("storage_key") or "download").rsplit("/", 1)[-1]
+
+
+@router.post("/artifacts/{artifact_id}/download", response_model=ArtifactPreviewGrant)
+async def create_artifact_download(
+    artifact_id: UUID,
+    response: Response,
+    current_user: CurrentUser = Depends(get_current_user),
+) -> ArtifactPreviewGrant:
+    """Issue a short-lived attachment URL after the same ownership checks as a preview."""
+    artifact = await resolve_owned_artifact(artifact_id, current_user)
+    if artifact.get("status") != "available" or artifact.get("kind") not in _DOWNLOADABLE_KINDS:
+        raise HTTPException(status_code=409, detail="This artifact is not available for download")
+    try:
+        configured_bucket = settings.require_object_storage()[1]
+    except RuntimeError:
+        raise HTTPException(status_code=503, detail="Downloads are temporarily unavailable") from None
+    if str(artifact.get("storage_bucket")) != configured_bucket:
+        logger.warning("Refusing download for an artifact in an unexpected bucket")
+        raise HTTPException(status_code=409, detail="This artifact is not available for download")
+    try:
+        storage = get_object_storage()
+        await run_in_threadpool(storage.head_object, str(artifact["storage_key"]))
+        url = await run_in_threadpool(
+            lambda: storage.presign_download(
+                str(artifact["storage_key"]),
+                settings.ARTIFACT_PREVIEW_TTL_SECONDS,
+                download_filename=_download_filename(artifact),
+            )
+        )
+    except ObjectNotFoundError:
+        raise HTTPException(status_code=404, detail="This file is no longer available") from None
+    except (ObjectStorageError, RuntimeError, ValueError):
+        logger.info("Unable to create an artifact download grant", exc_info=True)
+        raise HTTPException(status_code=503, detail="Downloads are temporarily unavailable") from None
+    response.headers["Cache-Control"] = "no-store"
+    response.headers["Referrer-Policy"] = "no-referrer"
+    return ArtifactPreviewGrant(
+        artifact_id=artifact_id,
+        url=url,
+        expires_at=datetime.now(timezone.utc) + timedelta(seconds=settings.ARTIFACT_PREVIEW_TTL_SECONDS),
+        content_type=str(artifact.get("content_type") or "application/octet-stream"),
+    )
+
+
 @router.get("/patches/{patch_id}", response_model=PatchDetailRead)
 async def get_patch_detail(
     patch_id: UUID,

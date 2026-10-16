@@ -68,7 +68,13 @@ class ReleaseHardeningMiddleware(BaseHTTPMiddleware):
         path = request.url.path
         if path.endswith("/uploads/initiate"):
             limit = settings.UPLOAD_INITIATE_RATE_LIMIT_PER_MINUTE
-        elif path.startswith(f"{settings.API_V1_STR}/acquisitions"):
+        elif path.startswith(f"{settings.API_V1_STR}/acquisitions") or (
+            # Optical search and run creation call Copernicus (and spend
+            # processing units); the run list and detail are polled and stay on
+            # the general limit.
+            path == f"{settings.API_V1_STR}/optical/search"
+            or (path == f"{settings.API_V1_STR}/optical/runs" and request.method == "POST")
+        ):
             # Each of these can cause an upstream provider call or a ~1 GB
             # server-side transfer, so they get a tighter bucket than the
             # general control-plane limit.
@@ -106,6 +112,8 @@ def _metric_path(path: str) -> str:
         return "/api/v1/uploads"
     if path.startswith("/api/v1/acquisitions"):
         return "/api/v1/acquisitions"
+    if path.startswith("/api/v1/optical"):
+        return "/api/v1/optical"
     if path.startswith("/api/v1/jobs"):
         return "/api/v1/jobs"
     if path.startswith("/api/v1/scenes"):
