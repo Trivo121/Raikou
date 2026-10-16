@@ -1,7 +1,7 @@
 from qdrant_client import QdrantClient
 from qdrant_client.models import Distance, VectorParams, PointStruct, Filter, FieldCondition, MatchValue, PayloadSchemaType
 from app.core.config import settings
-from app.services.storage.payloads import QdrantPatchPayload, TENANT_QDRANT_PAYLOAD_FIELDS
+from app.services.storage.payloads import OpticalWindowPayload, QdrantPatchPayload, TENANT_QDRANT_PAYLOAD_FIELDS
 
 class QdrantStore:
     _instance = None
@@ -33,7 +33,7 @@ class QdrantStore:
                 raise RuntimeError("Qdrant collection must expose one unnamed 768-dimensional vector.")
             if actual_size != vector_size:
                 raise RuntimeError(
-                    f"Qdrant collection vector size is {actual_size}; expected {vector_size} for SARCLIP."
+                    f"Qdrant collection {collection_name} vector size is {actual_size}; expected {vector_size}."
                 )
         self._ensure_payload_indexes(collection_name)
 
@@ -310,3 +310,52 @@ class QdrantStore:
             ),
         )
 
+    # ------------------------------------------------------------------ optical windows
+
+    def upsert_optical_windows(self, collection_name: str, points: list[dict]) -> None:
+        """Upsert optical window vectors after validating their tenant payload."""
+        qdrant_points: list[PointStruct] = []
+        for point in points:
+            try:
+                payload = OpticalWindowPayload.model_validate(point["payload"])
+                qdrant_points.append(PointStruct(id=point["id"], vector=point["vector"], payload=payload.as_qdrant_payload()))
+            except (KeyError, TypeError, ValueError) as exc:
+                raise ValueError("Invalid optical Qdrant point; a complete scoped payload is required") from exc
+        if qdrant_points:
+            self.client.upsert(collection_name=collection_name, points=qdrant_points)
+
+    def retrieve_owned_point(self, collection_name: str, point_id: str, *, owner_id: str) -> dict | None:
+        """One point with its vector, only if it belongs to ``owner_id``."""
+        if not self.client.collection_exists(collection_name=collection_name):
+            return None
+        found = self.client.retrieve(collection_name=collection_name, ids=[point_id], with_payload=True, with_vectors=True)
+        if not found:
+            return None
+        point = found[0]
+        payload = point.payload or {}
+        if str(payload.get("owner_id")) != str(owner_id):
+            return None
+        return {"id": str(point.id), "vector": list(point.vector), "payload": payload}
+
+    def search_owner_windows(
+        self,
+        collection_name: str,
+        query_vector: list[float],
+        *,
+        owner_id: str,
+        exclude_scene_id: str | None = None,
+        limit: int = 10,
+    ) -> list[dict]:
+        """Nearest windows across all of one owner's runs; the owner filter is never optional."""
+        if not owner_id:
+            raise ValueError("owner_id is required for an optical window search")
+        if not self.client.collection_exists(collection_name=collection_name):
+            return []
+        query_filter = Filter(
+            must=[FieldCondition(key="owner_id", match=MatchValue(value=str(owner_id)))],
+            must_not=[FieldCondition(key="scene_id", match=MatchValue(value=str(exclude_scene_id)))] if exclude_scene_id else None,
+        )
+        result = self.client.query_points(
+            collection_name=collection_name, query=query_vector, query_filter=query_filter, limit=limit, with_payload=True
+        )
+        return [{"id": str(hit.id), "score": hit.score, "payload": hit.payload} for hit in getattr(result, "points", result)]

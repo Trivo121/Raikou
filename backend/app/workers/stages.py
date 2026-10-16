@@ -1177,8 +1177,11 @@ class M3Pipeline(OpticalStagesMixin):
     def _delete_external_state(self, task: dict[str, Any], *, include_sources: bool) -> dict[str, Any]:
         store = QdrantStore.get_instance()
         try:
-            store.delete_vectors_by_scene(settings.QDRANT_COLLECTION, owner_id=str(task["owner_id"]),
-                                          project_id=str(task["project_id"]), scene_id=str(task["scene_id"]))
+            # Both collections: a scene's vectors live in exactly one of them, and
+            # deleting by scene from the other is a no-op.
+            for collection in (settings.QDRANT_COLLECTION, settings.OPTICAL_QDRANT_COLLECTION):
+                store.delete_vectors_by_scene(collection, owner_id=str(task["owner_id"]),
+                                              project_id=str(task["project_id"]), scene_id=str(task["scene_id"]))
         except Exception as exc:
             raise RetryableTaskError("Unable to remove private Qdrant vectors.") from exc
         artifacts = self.repository.artifacts_for_cleanup(task, include_sources=include_sources)

@@ -1,11 +1,13 @@
 """The optical stages end to end against fakes: offline, no database, no torch.
 
 Every repository and storage call is bound against the real WorkerRepository
-and S3ObjectStorage signatures, and the model call against the release's own
-``run_aoi`` signature, so a renamed keyword fails here instead of on the box
-halfway through a run. Sentinel Hub is replaced at the HTTP seam and the model
-at ``lulc_model``; everything in between (GeoTIFF checks, the overview, the
-date selection, CSV parsing, the bundle zip, the record) is production code.
+and S3ObjectStorage signatures, Qdrant calls against QdrantStore, and the model
+calls against the release's own ``run_aoi`` and ``predict_tile`` signatures, so
+a renamed keyword fails here instead of on the box halfway through a run.
+Sentinel Hub is replaced at the HTTP seam and the model at ``lulc_model``;
+everything in between (GeoTIFF checks, the overview, the date selection, CSV
+parsing, the captured model outputs, embeddings, window vectors, the bundle
+zip, the record) is production code.
 """
 
 from __future__ import annotations
@@ -27,15 +29,27 @@ import httpx
 import numpy as np
 from PIL import Image
 import pytest
+import rasterio
 from rasterio.io import MemoryFile
 from rasterio.transform import Affine
 
 from app.core.config import settings
 from app.services.acquisitions import copernicus
 from app.services.optical import lulc_model
-from app.services.optical.artifacts import BUNDLE_KEY, OVERVIEW_KEY, PREVIEW_KEYS, RECORD_KEY, SUMMARY_KEY
+from app.services.optical.artifacts import (
+    BUNDLE_KEY,
+    EMBEDDINGS_KEY,
+    OVERVIEW_KEY,
+    PREVIEW_KEYS,
+    RECORD_KEY,
+    SUMMARY_KEY,
+    WINDOWS_KEY,
+    public_name,
+)
 from app.services.optical.grid import OpticalGrid
 from app.services.storage.object_store import ObjectInfo, ObjectNotFoundError, S3ObjectStorage
+from app.services.storage.payloads import OpticalWindowPayload
+from app.services.storage.qdrant import QdrantStore
 from app.workers import stages
 from app.workers.repository import RetryableTaskError, UserFacingTaskError, WorkerRepository
 
@@ -46,6 +60,8 @@ DAYS = [d[:10] for d in STACK_DATES]
 # Cloudy columns per date: 75% clear, ~6% clear (below the 30% bar), fully clear.
 CLOUD_COLS = {"2025-11-02": 32, "2026-02-05": 120, "2026-04-12": 0}
 SCENE_NAME = "Land cover 2025-11-02 (17.720, 83.245)"
+CLASS_NAMES = ["Built-up", "Agriculture", "Forest & natural vegetation", "Barren / wasteland", "Water bodies & wetlands"]
+FEATURE_DIM = 48  # small stand-in for the encoder's 768; the collection must take it from the vectors
 SLUG = "land_cover_2025_11_02_17_720_83_245"
 MODEL_SUMMARY = {
     "name": "Raikou OlmoEarth India LULC (5 classes)",
@@ -213,6 +229,7 @@ def release_code():
             tiles=importlib.import_module("raikou_phase0.tiles"),
             gis_export=importlib.import_module("raikou_phase0.gis_export"),
             run_aoi=_release_signature(PHASE0 / "raikou_phase0" / "bundle.py", "run_aoi"),
+            predict_tile=_release_signature(PHASE0 / "raikou_phase0" / "infer.py", "predict_tile"),
         )
     finally:
         sys.path.remove(str(PHASE0))
@@ -220,8 +237,50 @@ def release_code():
             del sys.modules[name]
 
 
-def _fake_run_aoi(release_code, calls: list[dict[str, Any]]):
+def _model_outputs(valid: np.ndarray, use: list[int]) -> dict[str, Any]:
+    """What predict_tile returns: blended logits, has_data and encoder features (D, H/4, W/4).
+
+    The map is built-up on the left half and forest on the right; the
+    features follow the same split, so window vectors and similarity have
+    structure to check.
+    """
+    height, width = GRID.height, GRID.width
+    classes = np.zeros((height, width), np.uint8)
+    classes[:, width // 2 :] = 2  # forest & natural vegetation
+    logits = np.full((len(CLASS_NAMES), height, width), -2.0, np.float32)
+    for k in range(len(CLASS_NAMES)):
+        logits[k][classes == k] = 3.0
+    rng = np.random.default_rng(5)
+    left, right = rng.normal(size=FEATURE_DIM), rng.normal(size=FEATURE_DIM)
+    feats = np.empty((FEATURE_DIM, height // 4, width // 4), np.float32)
+    feats[:, :, : width // 8] = left[:, None, None]
+    feats[:, :, width // 8 :] = right[:, None, None]
+    feats += 0.01 * rng.normal(size=feats.shape)
+    return {
+        "logits": logits,
+        "has_data": valid[use].any(0),
+        "timesteps_used": list(use),
+        "features": feats.astype(np.float16),
+    }
+
+
+def _write_class_raster(path: Path, classes: np.ndarray, has_data: np.ndarray) -> None:
+    export = np.where(has_data, classes.astype(np.int16) + 1, 0).astype(np.uint8)
+    with rasterio.open(path, "w", driver="GTiff", width=GRID.width, height=GRID.height, count=1, dtype="uint8",
+                       crs=f"EPSG:{GRID.epsg}", transform=Affine(*GRID.transform), nodata=0) as dst:
+        dst.write(export, 1)
+
+
+def _fake_bundle(release_code, calls: list[dict[str, Any]], predict_calls: list[dict[str, Any]]) -> SimpleNamespace:
+    """run_aoi and predict_tile with the release's signatures; run_aoi finds predict_tile on its module, as the real one does."""
     G = release_code.gis_export
+    bundle = SimpleNamespace()
+
+    def predict_tile(*args, **kwargs):
+        bound = release_code.predict_tile.bind(*args, **kwargs)
+        bound.apply_defaults()
+        predict_calls.append(dict(bound.arguments))
+        return _model_outputs(bound.arguments["valid"], bound.arguments["use_timesteps"])
 
     def run_aoi(*args, **kwargs):
         bound = release_code.run_aoi.bind(*args, **kwargs)
@@ -230,21 +289,52 @@ def _fake_run_aoi(release_code, calls: list[dict[str, Any]]):
         calls.append(call)
         out, name = Path(call["out_dir"]), call["name"]
         out.mkdir(parents=True, exist_ok=True)
-        rng = np.random.default_rng(3)
-        classes = rng.integers(0, G.C.NUM_CLASSES, size=(GRID.height, GRID.width)).astype(np.uint8)
-        reference = np.where(rng.random(classes.shape) < 0.8, classes, (classes + 1) % G.C.NUM_CLASSES).astype(np.uint8)
+        res = bundle.predict_tile(call["model"], call["dn"], call["valid"], call["dates"],
+                                  use_timesteps=call["use_timesteps"], amp=call["amp"], want_features=True)
+        classes = res["logits"].argmax(0).astype(np.uint8)
+        reference = np.where(np.random.default_rng(3).random(classes.shape) < 0.8, classes, (classes + 1) % G.C.NUM_CLASSES).astype(np.uint8)
         G.write_agreement_csv(str(out / "agreement_matrix.csv"), G.agreement_matrix(classes, reference), "dates", {"T1": 0.13})
         G.write_csv(str(out / "lulc_stats.csv"), G.class_stats(classes, reference, np.full(classes.shape, 80.0)))
+        _write_class_raster(out / f"{name}_lulc_10m.tif", classes, res["has_data"])
         for suffix in PREVIEW_KEYS:
             Image.new("RGB", (8, 8)).save(out / f"{name}_{suffix}")
-        for suffix in ("lulc_10m.tif", "lulc_10m.qml", "lulc_10m.clr", "lulc_10m.tif.aux.xml", "score_10m.tif",
+        for suffix in ("lulc_10m.qml", "lulc_10m.clr", "lulc_10m.tif.aux.xml", "score_10m.tif",
                        "worldcover2021_10m.tif", "polygons.gpkg", "model_view_pca.tif", "similarity.tif", "similarity.qml"):
             (out / f"{name}_{suffix}").write_bytes(b"stand-in")
         (out / "VALIDATION_AND_CITATION.txt").write_text("cite", encoding="utf-8")
         (out / "run_summary.json").write_text("{}", encoding="utf-8")
         return {"out_dir": str(out), "raster_format": "COG", "polygons": 42, "dates": "", "valid_fraction": 0.81}
 
-    return run_aoi
+    bundle.predict_tile = predict_tile
+    bundle.run_aoi = run_aoi
+    return bundle
+
+
+class FakeQdrant:
+    """Optical side of QdrantStore; every call bound to the real signature, every payload validated."""
+
+    def __init__(self) -> None:
+        self.collections: dict[str, int] = {}
+        self.points: dict[str, tuple[list[float], dict[str, Any]]] = {}
+
+    def initialize_collection(self, collection_name, vector_size=768):
+        _bind(QdrantStore, "initialize_collection", collection_name, vector_size=vector_size)
+        self.collections[collection_name] = vector_size
+
+    def delete_vectors_by_scene(self, collection_name, *, owner_id, project_id, scene_id):
+        _bind(QdrantStore, "delete_vectors_by_scene", collection_name, owner_id=owner_id, project_id=project_id, scene_id=scene_id)
+        self.points = {k: v for k, v in self.points.items() if v[1]["scene_id"] != str(scene_id)}
+
+    def upsert_optical_windows(self, collection_name, points):
+        _bind(QdrantStore, "upsert_optical_windows", collection_name, points)
+        for point in points:
+            payload = OpticalWindowPayload.model_validate(point["payload"]).as_qdrant_payload()
+            assert len(point["vector"]) == self.collections[collection_name]
+            self.points[point["id"]] = (point["vector"], payload)
+
+    def count_vectors_by_scene(self, collection_name, *, owner_id, project_id, scene_id):
+        _bind(QdrantStore, "count_vectors_by_scene", collection_name, owner_id=owner_id, project_id=project_id, scene_id=scene_id)
+        return sum(1 for _, p in self.points.values() if p["scene_id"] == str(scene_id) and p["owner_id"] == str(owner_id))
 
 
 @pytest.fixture
@@ -273,11 +363,16 @@ def optical(tmp_path, monkeypatch, release_code):
     )
 
     model_calls: list[dict[str, Any]] = []
-    phase0 = SimpleNamespace(bundle=SimpleNamespace(run_aoi=_fake_run_aoi(release_code, model_calls)),
-                             tiles=release_code.tiles, infer=None)
+    predict_calls: list[dict[str, Any]] = []
+    bundle = _fake_bundle(release_code, model_calls, predict_calls)
+    phase0 = SimpleNamespace(bundle=bundle, tiles=release_code.tiles, infer=None)
     monkeypatch.setattr(lulc_model, "phase0", lambda: phase0)
     monkeypatch.setattr(lulc_model, "get_model", lambda: SimpleNamespace(P=4))
-    monkeypatch.setattr(lulc_model, "card", lambda: {"calibration": {"temperature": 1.31}})
+    monkeypatch.setattr(
+        lulc_model, "card", lambda: {"calibration": {"temperature": 1.31}, "classes": [{"name": n} for n in CLASS_NAMES]}
+    )
+    qdrant = FakeQdrant()
+    monkeypatch.setattr(QdrantStore, "get_instance", staticmethod(lambda: qdrant))
     monkeypatch.setattr(lulc_model, "benchmark", lambda: {"summary": {"T1": {"overall_accuracy": 0.87}}})
     monkeypatch.setattr(lulc_model, "card_summary", lambda: dict(MODEL_SUMMARY))
     monkeypatch.setattr(lulc_model, "amp", lambda: "fp16")
@@ -304,8 +399,8 @@ def optical(tmp_path, monkeypatch, release_code):
                 "project_id": project, "stage": stage, "attempt": 1, "max_attempts": 3, "locked_by": ""}
         return pipeline.run(task)
 
-    yield SimpleNamespace(run=run, repository=repository, storage=storage,
-                          process_calls=process_calls, model_calls=model_calls)
+    yield SimpleNamespace(run=run, repository=repository, storage=storage, process_calls=process_calls,
+                          model_calls=model_calls, predict_calls=predict_calls, qdrant=qdrant, bundle=bundle)
     copernicus.reset_token_cache()
 
 
@@ -328,7 +423,7 @@ def test_a_three_date_run_goes_from_fetch_to_finalize(optical):
 
     assert [stage for stage, _ in results] == [
         "fetch_source", "validate_upload", "extract_metadata", "build_overview",
-        "embed_patches", "build_evidence", "finalize",
+        "embed_patches", "build_evidence", "index_vectors", "finalize",
     ]
     assert dict(results)["build_overview"].next_stage == ("embed_patches", "optical")
     assert dict(results)["finalize"].result["pipeline"] == "optical"
@@ -443,6 +538,84 @@ def test_the_record_and_evidence_row_describe_the_run(optical):
     assert repository.evidence["metadata"]["is_detector_evidence"] is False
     assert repository.evidence["metadata"]["record_artifact_id"] == record_artifact["id"]
     assert repository.evidence["model_name"] == MODEL_SUMMARY["name"]
+    assert record["similarity"]["available"] is True and record["similarity"]["indexed_windows"] == 4
+    assert len(record["spectral"]["rows"]) == 3 * len(CLASS_NAMES)
+
+
+def test_the_model_runs_once_and_its_outputs_are_captured(optical):
+    _run_all(optical)
+
+    (predict,) = optical.predict_calls
+    assert predict["use_timesteps"] == [0, 2] and predict["want_features"] is True
+    # The wrapper is gone after the stage: the next run starts from the release's own function.
+    assert optical.bundle.predict_tile.__name__ == "predict_tile"
+
+
+def test_embeddings_keep_what_the_model_sees_and_stay_internal(optical):
+    _run_all(optical)
+    artifact = optical.repository.artifacts[EMBEDDINGS_KEY]
+    meta = artifact["metadata"]
+
+    with np.load(optical.storage._path(artifact["storage_key"])) as data:
+        reduced, valid = data["reduced"], data["valid"]
+    assert reduced.shape == (GRID.height // 4, GRID.width // 4, meta["dims"]) and reduced.dtype == np.float16
+    assert meta["dims"] <= settings.OPTICAL_EMBEDDING_DIMS
+    assert meta["energy_captured"] > 0.99  # two directions plus a little noise
+    assert (meta["token_px"], meta["token_m"]) == (4, 40.0)
+    assert valid.all()  # the third date is fully clear
+    assert artifact["kind"] == "other" and public_name(EMBEDDINGS_KEY) is None and public_name(WINDOWS_KEY) is None
+
+
+def test_window_vectors_are_indexed_with_their_place_and_map_mix(optical):
+    results = dict(_run_all(optical))
+    qdrant = optical.qdrant
+    windows = optical.repository.artifacts[WINDOWS_KEY]
+
+    # The collection takes its size from the model's vectors, not from a constant.
+    assert qdrant.collections == {settings.OPTICAL_QDRANT_COLLECTION: FEATURE_DIM}
+    # 34 x 32 tokens in 16 x 16 windows: four full windows; the 2-token bottom strip is below the minimum.
+    assert windows["metadata"]["window_count"] == 4 == len(qdrant.points)
+    assert results["index_vectors"].result["indexed"] == 4
+    assert results["finalize"].result["vector_count"] == 4
+    west, south, east, north = GRID.bbox_lonlat()
+    payloads = sorted((p for _, p in qdrant.points.values()), key=lambda p: (p["window_row"], p["window_col"]))
+    for payload in payloads:
+        w, s, e, n = payload["bbox_lonlat"]
+        assert west - 1e-6 <= w < e <= east + 1e-6 and south - 1e-6 <= s < n <= north + 1e-6
+        assert payload["dates"] == [DAYS[0], DAYS[2]] and payload["window_px"] == 64
+    assert [p["dominant_class"] for p in payloads] == ["Built-up", "Forest & natural vegetation"] * 2
+    assert payloads[0]["class_shares"] == {"Built-up": 100.0}
+
+
+def test_reindexing_replaces_the_scene_windows(optical):
+    _run_all(optical)
+    first = dict(optical.qdrant.points)
+
+    optical.run("index_vectors")
+
+    assert set(optical.qdrant.points) == set(first)
+
+
+def test_the_bundle_gains_spectral_indices_and_class_probabilities(optical):
+    _run_all(optical)
+    artifacts = optical.repository.artifacts
+
+    with zipfile.ZipFile(optical.storage._path(artifacts[BUNDLE_KEY]["storage_key"])) as archive:
+        names = set(archive.namelist())
+    assert f"{SLUG}_gis_bundle/spectral_indices.csv" in names
+    assert f"{SLUG}_gis_bundle/{SLUG}_class_probabilities_10m.tif" in names
+    probabilities = artifacts[f"derived:optical:file:{SLUG}_class_probabilities_10m.tif:v1"]
+    with rasterio.open(optical.storage._path(probabilities["storage_key"])) as ds:
+        assert (ds.count, ds.dtypes[0], ds.nodata) == (5, "uint8", 255)
+        assert ds.descriptions[0] == "P(Built-up) %"
+        assert ds.crs.to_epsg() == GRID.epsg and tuple(ds.transform)[:6] == GRID.transform
+        built_up, forest = ds.read(1), ds.read(3)
+    # Logits 3 against -2 at temperature 1.31 give the mapped class about 92%.
+    assert built_up[:, : GRID.width // 2].min() >= 85 and forest[:, GRID.width // 2 :].min() >= 85
+    summary = optical.storage.read_json(artifacts[SUMMARY_KEY]["storage_key"])
+    assert len(summary["spectral_indices"]) == 3 * len(CLASS_NAMES)
+    built_up_rows = [r for r in summary["spectral_indices"] if r["class_name"] == "Built-up"]
+    assert [r["used_by_model"] for r in built_up_rows] == [True, False, True]
 
 
 # --------------------------------------------------------------------------
@@ -493,5 +666,15 @@ def test_every_date_under_cloud_stops_before_the_model(optical, monkeypatch):
 
 
 def test_finalize_waits_for_every_required_artifact(optical):
+    with pytest.raises(RetryableTaskError):
+        optical.run("finalize")
+
+
+def test_finalize_waits_for_every_window_vector(optical):
+    for stage in ("fetch_source", "validate_upload", "extract_metadata", "build_overview",
+                  "embed_patches", "build_evidence", "index_vectors"):
+        optical.run(stage)
+    optical.qdrant.points.popitem()
+
     with pytest.raises(RetryableTaskError):
         optical.run("finalize")

@@ -33,12 +33,19 @@ from app.schemas.optical import (
     OpticalSearchRequest,
     OpticalSearchResponse,
     OpticalSeasonRead,
+    OpticalSimilarRequest,
+    OpticalSimilarResponse,
+    OpticalSimilarScope,
 )
 from app.services.acquisitions import copernicus, sentinel2
 from app.services.database import get_supabase
-from app.services.optical.artifacts import RECORD_KEY, public_name
+from app.services.optical import similar as similar_service
+from app.services.optical.artifacts import EMBEDDINGS_KEY, RECORD_KEY, WINDOWS_KEY, public_name
+from app.services.optical.embeddings import LABEL as SIMILAR_LABEL
+from app.services.optical.embeddings import MEANING as SIMILAR_MEANING
 from app.services.optical.grid import GridError, OpticalGrid, estimate_pu, grid_for_box
 from app.services.storage.object_store import get_object_storage
+from app.services.storage.qdrant import QdrantStore
 
 router = APIRouter()
 logger = logging.getLogger(__name__)
@@ -53,6 +60,10 @@ SEASONS = [
     ("summer", "04-01", "05-20"),
 ]
 MAX_RECORD_BYTES = 2 * 1024 * 1024
+REPROCESS_DETAIL = (
+    "This run was made before similarity search was added. Reprocess it to add it; "
+    "the stored imagery is reused, so no processing units are spent."
+)
 
 
 async def _execute(operation: Callable[[], Any], unavailable_detail: str) -> Any:
@@ -602,3 +613,124 @@ async def read_run(scene_id: UUID, current_user: CurrentUser = Depends(get_curre
             logger.info("Could not read an optical scene record", exc_info=True)
             record = None
     return OpticalRunDetail(**base, artifacts=artifacts, record=record)
+
+
+# --------------------------------------------------------------------------- similarity
+
+
+@router.post("/runs/{scene_id}/similar", response_model=OpticalSimilarResponse)
+async def similar(
+    scene_id: UUID, payload: OpticalSimilarRequest, current_user: CurrentUser = Depends(get_current_user)
+) -> OpticalSimilarResponse:
+    """Where else this spot looks the same to the model: a heatmap over the run, or windows in your other runs."""
+    scene = await resolve_owned_scene(scene_id, current_user)
+    meta = scene.get("metadata") if isinstance(scene.get("metadata"), dict) else {}
+    if meta.get("pipeline") != PIPELINE:
+        raise HTTPException(status_code=404, detail="Optical run not found")
+    if str(scene.get("status") or "") != "ready":
+        raise HTTPException(status_code=409, detail="This run is still processing; similarity is available once it is ready.")
+    rows = _rows(
+        await _execute(
+            lambda: get_supabase()
+            .table("scene_artifacts")
+            .select("id,logical_key,storage_key,size_bytes,checksum_sha256,metadata")
+            .eq("scene_id", str(scene_id))
+            .eq("owner_id", current_user.id)
+            .eq("status", "available")
+            .in_("logical_key", [EMBEDDINGS_KEY, WINDOWS_KEY])
+            .execute(),
+            "Artifact data is temporarily unavailable",
+        )
+    )
+    found = {str(row.get("logical_key")): row for row in rows}
+    embedding = found.get(EMBEDDINGS_KEY)
+    if embedding is None:
+        raise HTTPException(status_code=409, detail=REPROCESS_DETAIL)
+    emb_meta = embedding.get("metadata") or {}
+    model_label = " ".join(str(v) for v in (emb_meta.get("model_name"), emb_meta.get("model_version")) if v)
+    try:
+        grid = OpticalGrid.from_dict(emb_meta.get("grid") or {})
+        token_px = int(emb_meta.get("token_px") or 4)
+        row, col = await run_in_threadpool(similar_service.seed_token, grid, token_px, payload.lon, payload.lat)
+        seed = {"lon": payload.lon, "lat": payload.lat, "token_row": row, "token_col": col, "token_m": token_px * grid.res}
+
+        if payload.scope is OpticalSimilarScope.RUN:
+            reduced, valid = await run_in_threadpool(similar_service.load_embeddings, get_object_storage(), embedding)
+            heat = await run_in_threadpool(
+                lambda: similar_service.run_heatmap(reduced, valid, row, col, grid=grid, token_px=token_px)
+            )
+            return OpticalSimilarResponse(
+                scope=OpticalSimilarScope.RUN,
+                label=SIMILAR_LABEL,
+                meaning=SIMILAR_MEANING,
+                seed=seed,
+                image=heat["image"],
+                areas=heat["areas"],
+                basis={
+                    "model": model_label,
+                    "embedding": emb_meta.get("basis"),
+                    "dims": emb_meta.get("dims"),
+                    "energy_captured": emb_meta.get("energy_captured"),
+                    "token_m": token_px * grid.res,
+                },
+            )
+
+        windows = found.get(WINDOWS_KEY)
+        if windows is None:
+            raise HTTPException(status_code=409, detail=REPROCESS_DETAIL)
+        win_meta = windows.get("metadata") or {}
+        limit = min(payload.limit or 10, settings.OPTICAL_SIMILAR_MAX_MATCHES)
+        seed_point, hits, window = await run_in_threadpool(
+            lambda: similar_service.library_matches(
+                QdrantStore.get_instance(),
+                scene_id=str(scene_id),
+                owner_id=current_user.id,
+                model_version=str(win_meta.get("model_version") or "unknown"),
+                window_tokens=int(win_meta.get("window_tokens") or settings.OPTICAL_WINDOW_TOKENS),
+                row=row,
+                col=col,
+                limit=limit,
+            )
+        )
+    except similar_service.SimilarError as exc:
+        raise HTTPException(status_code=exc.status, detail=exc.detail) from None
+    except GridError:
+        raise HTTPException(status_code=409, detail="This run's stored grid is unreadable; reprocess it.") from None
+    except HTTPException:
+        raise
+    except Exception:
+        logger.exception("Optical similarity failed scene_id=%s", scene_id)
+        raise HTTPException(status_code=503, detail="Similarity search is temporarily unavailable.") from None
+
+    # PostgreSQL stays the authority: a window only counts if its run still exists and is the caller's.
+    ids = sorted({str((hit.get("payload") or {}).get("scene_id")) for hit in hits if (hit.get("payload") or {}).get("scene_id")})
+    names: dict[str, Any] = {}
+    if ids:
+        scene_rows = _rows(
+            await _execute(
+                lambda: get_supabase().table("scenes").select("id,name").eq("owner_id", current_user.id).in_("id", ids).execute(),
+                "Scene data is temporarily unavailable",
+            )
+        )
+        names = {str(r["id"]): r.get("name") for r in scene_rows}
+    matches = [
+        similar_service.window_match(hit.get("payload") or {}, hit.get("score"), names[str((hit.get("payload") or {}).get("scene_id"))])
+        for hit in hits
+        if str((hit.get("payload") or {}).get("scene_id")) in names
+    ]
+    notes = [] if matches else ["No windows from your other optical runs yet; run more areas to compare across them."]
+    return OpticalSimilarResponse(
+        scope=OpticalSimilarScope.LIBRARY,
+        label=SIMILAR_LABEL,
+        meaning=similar_service.LIBRARY_MEANING,
+        seed={**seed, "window_row": window[0], "window_col": window[1]},
+        seed_window=similar_service.window_match(seed_point.get("payload") or {}, None, scene.get("name")),
+        matches=matches,
+        basis={
+            "model": model_label,
+            "embedding": win_meta.get("embedding"),
+            "window_m": win_meta.get("window_m"),
+            "dim": win_meta.get("dim"),
+        },
+        notes=notes,
+    )

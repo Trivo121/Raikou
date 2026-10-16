@@ -76,6 +76,12 @@ class EvidenceCitation(BaseModel):
         # its own source_type so a client can style it distinctly from an
         # overview photograph and from a retrieved patch.
         "scattering_map",
+        # Optical runs: the land-cover map (or its WorldCover 2021 reference,
+        # named in provenance.layer), the true-colour Sentinel-2 image, and the
+        # model-view similarity preview. None of them is detector evidence.
+        "lulc_map",
+        "optical_overview",
+        "similarity_map",
     ]
     source_id: UUID | str
     scene_id: UUID

@@ -54,6 +54,16 @@ from app.services.processing.chat_policy import (
     detector_answer,
     environment_answer,
 )
+from app.services.processing.optical_chat import (
+    FALLBACK_FOOTER,
+    OPTICAL_RECORD_TYPE,
+    OPTICAL_SYSTEM_PROMPT,
+    classify_optical_query,
+    compose_optical_answer,
+    message_mode,
+    optical_citations,
+    optical_context_text,
+)
 from app.services.processing.scene_geography import (
     footprint_payload,
     format_coordinate,
@@ -1606,6 +1616,171 @@ async def _insert_message(
     return _first_row(response)
 
 
+def _is_optical_scene(scene: dict[str, Any]) -> bool:
+    metadata = scene.get("metadata")
+    return isinstance(metadata, dict) and metadata.get("pipeline") == "optical"
+
+
+async def _stream_optical_chat(
+    *,
+    conversation_id: UUID,
+    project_id: UUID,
+    scene: dict[str, Any],
+    request: ChatStreamRequest,
+    current_user: CurrentUser,
+) -> StreamingResponse:
+    """Scene-scoped chat for an optical run: answers composed from its record first.
+
+    The SAR path never sees an optical scene, and this one never runs patch
+    retrieval: an optical run has no SAR patches, and its record already holds
+    every number a question about it can honestly be answered with. Only a
+    question no intent covers reaches the language model, with the record as
+    bounded context and no images.
+    """
+    scene_id = UUID(str(scene["id"]))
+    evidence_rows = _rows(
+        await _execute(
+            lambda: get_supabase()
+            .table("scene_evidence_records")
+            .select("id,scene_id,summary,metadata")
+            .eq("owner_id", current_user.id)
+            .eq("project_id", str(project_id))
+            .eq("status", "ready")
+            .eq("is_current", True)
+            .eq("scene_id", str(scene_id))
+            .execute(),
+            "Evidence data is temporarily unavailable",
+        )
+    )
+    evidence_by_scene = {str(row["scene_id"]): row for row in evidence_rows}
+    records = await _load_scene_records(
+        evidence_by_scene=evidence_by_scene, project_id=project_id, current_user=current_user
+    )
+    record = records.get(str(scene_id))
+    if not isinstance(record, dict) or record.get("record_type") != OPTICAL_RECORD_TYPE:
+        record = None
+    intent = classify_optical_query(request.query)
+    citations = (
+        [
+            EvidenceCitation.model_validate(item).model_dump(mode="json")
+            for item in optical_citations(
+                record,
+                scene_id=str(scene_id),
+                record_artifact_id=_record_artifact_id(evidence_by_scene.get(str(scene_id))),
+                intent=intent,
+            )
+        ]
+        if record is not None
+        else []
+    )
+    user_message = await _insert_message(
+        conversation_id=conversation_id,
+        project_id=project_id,
+        scene_id=scene_id,
+        current_user=current_user,
+        role="user",
+        content=request.query,
+        mode="grounded",
+        status_value="complete",
+    )
+    if user_message is None:
+        raise HTTPException(status_code=503, detail="Conversation message could not be saved")
+
+    async def persist(content: str, mode: str, status_value: str, *, error_detail: str | None = None) -> dict[str, Any] | None:
+        return await _insert_message(
+            conversation_id=conversation_id,
+            project_id=project_id,
+            scene_id=scene_id,
+            current_user=current_user,
+            role="assistant",
+            content=content,
+            mode=mode,
+            status_value=status_value,
+            citations=citations,
+            error_detail=error_detail,
+        )
+
+    async def event_stream() -> AsyncIterator[str]:
+        yield _ndjson("conversation", {"id": str(conversation_id), "project_id": str(project_id), "scene_id": str(scene_id)})
+        yield _ndjson("status", {
+            "state": "optical_record" if record is not None else "empty",
+            "retrieval_state": "empty",
+            "message": "Loaded this run's optical record." if record is not None else "This run has no finished record yet.",
+        })
+        if record is None:
+            text = "This optical run has no finished record yet, so there is nothing to answer from. Ask again once the run is ready."
+            assistant = await persist(text, "optical_insufficient", "complete")
+            yield _ndjson("citations", citations)
+            yield _ndjson("text", text)
+            yield _ndjson("done", {"status": "complete", "message_id": str(assistant["id"]) if assistant else None})
+            return
+
+        answer = compose_optical_answer(intent, record, request.query)
+        if answer is not None:
+            assistant = await persist(answer, message_mode(intent), "complete")
+            yield _ndjson("citations", citations)
+            yield _ndjson("text", answer)
+            yield _ndjson("done", {"status": "complete", "message_id": str(assistant["id"]) if assistant else None})
+            return
+
+        full_response = ""
+        assistant_status = "complete"
+        assistant_mode = message_mode(intent)
+        citations_emitted = False
+        try:
+            yield _ndjson("citations", citations)
+            citations_emitted = True
+            yield _ndjson("status", {"state": "generating"})
+            history = await _conversation_history(conversation_id, current_user)
+            if history and history[-1].get("role") == "user" and history[-1].get("content") == request.query:
+                history.pop()
+            stream = await _open_grounded_stream(
+                system=OPTICAL_SYSTEM_PROMPT,
+                history=history,
+                text_part={"type": "text", "text": f"Question: {request.query}\n\n{optical_context_text(record)}"},
+                images=[],
+            )
+            async for chunk in stream:
+                if chunk.choices and chunk.choices[0].delta.content:
+                    delta = chunk.choices[0].delta.content
+                    full_response += delta
+                    yield _ndjson("text", delta)
+            if full_response:
+                full_response += FALLBACK_FOOTER
+                yield _ndjson("text", FALLBACK_FOOTER)
+        except asyncio.CancelledError:
+            assistant_status = "cancelled"
+            raise
+        except Exception:
+            logger.info("Optical grounded generation failed", exc_info=True)
+            assistant_status = "failed"
+            assistant_mode = "optical_grounded_failed"
+            if not full_response:
+                full_response = _safe_message_error()
+            if not citations_emitted:
+                yield _ndjson("citations", citations)
+            yield _ndjson("error", {"code": "generation_unavailable", "message": _safe_message_error()})
+        finally:
+            try:
+                assistant = await persist(
+                    full_response or _safe_message_error(),
+                    assistant_mode,
+                    assistant_status,
+                    error_detail="generation_unavailable" if assistant_status == "failed" else None,
+                )
+            except Exception:
+                logger.exception("Unable to persist optical assistant message")
+                assistant = None
+            if assistant_status != "cancelled":
+                yield _ndjson("done", {"status": assistant_status, "message_id": str(assistant["id"]) if assistant else None})
+
+    return StreamingResponse(
+        event_stream(),
+        media_type="application/x-ndjson",
+        headers={"Cache-Control": "no-store", "X-Accel-Buffering": "no"},
+    )
+
+
 @router.post("/conversations/{conversation_id}/stream")
 async def stream_grounded_chat(
     conversation_id: UUID,
@@ -1638,6 +1813,16 @@ async def stream_grounded_chat(
             filters=request.filters,
             current_user=current_user,
         )
+        # An optical run is answered from its own record; nothing below runs for it.
+        optical_scene = next((scene for scene in scoped_scenes if _is_optical_scene(scene)), None)
+        if optical_scene is not None:
+            return await _stream_optical_chat(
+                conversation_id=conversation_id,
+                project_id=project_id,
+                scene=optical_scene,
+                request=request,
+                current_user=current_user,
+            )
         scenes_by_id = {str(scene["id"]): scene for scene in scoped_scenes}
         if scoped_scenes:
             scene_record_search = EvidenceSearchResponse(

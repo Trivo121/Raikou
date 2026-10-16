@@ -325,6 +325,16 @@ class Settings(BaseSettings):
     OLMOEARTH_LULC_WEIGHTS: str = "olmoearth_india_lulc_fp16.pt"
     OLMOEARTH_LULC_AMP: Literal["fp16", "fp32"] = "fp16"
     OLMOEARTH_LULC_DEVICE: str | None = None
+    # Phase 2: what the model sees. Token embeddings are kept reduced to the
+    # top singular directions for "looks similar" heatmaps; 640 m window
+    # vectors (16 x 16 tokens of 40 m) go to their own Qdrant collection,
+    # sized from the model at index time.
+    OPTICAL_QDRANT_COLLECTION: str = "optical_patches"
+    OPTICAL_EMBEDDING_DIMS: int = Field(default=64, ge=8, le=256)
+    OPTICAL_WINDOW_TOKENS: int = Field(default=16, ge=4, le=64)
+    OPTICAL_WINDOW_MIN_TOKENS: int = Field(default=64, ge=1)
+    OPTICAL_SIMILAR_MAX_MATCHES: int = Field(default=25, ge=1, le=100)
+    OPTICAL_SIMILAR_CACHE_RUNS: int = Field(default=3, ge=1, le=20)
 
     model_config = SettingsConfigDict(
         env_file=".env",

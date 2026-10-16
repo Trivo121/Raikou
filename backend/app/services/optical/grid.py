@@ -85,6 +85,33 @@ class OpticalGrid:
         lons, lats = [c[0] for c in corners], [c[1] for c in corners]
         return (min(lons), min(lats), max(lons), max(lats))
 
+    def pixel_of(self, lon: float, lat: float) -> tuple[int, int] | None:
+        """(row, col) of the 10 m pixel holding this point, or None outside the grid."""
+        xs, ys = _transform(4326, self.epsg, [float(lon)], [float(lat)])
+        col = math.floor((xs[0] - self.x0) / self.res)
+        row = math.floor((self.y_top - ys[0]) / self.res)
+        if 0 <= row < self.height and 0 <= col < self.width:
+            return row, col
+        return None
+
+    def bboxes_lonlat(self, pixel_bounds: list[tuple[int, int, int, int]]) -> list[list[float]]:
+        """[west, south, east, north] for each (row0, row1, col0, col1) pixel window, in one transform call."""
+        if not len(pixel_bounds):
+            return []
+        xs: list[float] = []
+        ys: list[float] = []
+        for r0, r1, c0, c1 in pixel_bounds:
+            left, right = self.x0 + c0 * self.res, self.x0 + c1 * self.res
+            top, bottom = self.y_top - r0 * self.res, self.y_top - r1 * self.res
+            xs += [left, right, right, left]
+            ys += [top, top, bottom, bottom]
+        lons, lats = _transform(self.epsg, 4326, xs, ys)
+        out = []
+        for i in range(len(pixel_bounds)):
+            lo, la = lons[4 * i : 4 * i + 4], lats[4 * i : 4 * i + 4]
+            out.append([round(min(lo), 7), round(min(la), 7), round(max(lo), 7), round(max(la), 7)])
+        return out
+
     def as_dict(self) -> dict[str, Any]:
         return {
             "epsg": self.epsg,

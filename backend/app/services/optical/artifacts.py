@@ -15,16 +15,22 @@ SCENE_METADATA_KEY = "derived:optical:scene-metadata:v1"
 SUMMARY_KEY = "derived:optical:lulc-summary:v1"
 BUNDLE_KEY = "derived:optical:bundle-zip:v1"
 RECORD_KEY = "derived:scene-record:v1"
+# Internal: read by the index stage and the similarity endpoint, never offered as downloads.
+EMBEDDINGS_KEY = "derived:optical:embeddings:v1"
+WINDOWS_KEY = "derived:optical:window-vectors:v1"
 FILE_KEY_PREFIX = "derived:optical:file:"
 FILE_KEY_SUFFIX = ":v1"
 
-# File suffix written by raikou_phase0.bundle.run_aoi -> logical key of its preview.
+# File suffix in the bundle folder -> logical key of its preview. All but
+# score.png are written by raikou_phase0.bundle.run_aoi; score.png is rendered
+# by the optical stage from the same calibrated probabilities.
 PREVIEW_KEYS = {
     "lulc.png": "derived:optical:lulc:v1",
     "worldcover2021.png": "derived:optical:worldcover2021:v1",
     "true_color.png": "derived:optical:true-color:v1",
     "model_view_pca.png": "derived:optical:model-view:v1",
     "similarity.png": "derived:optical:similarity:v1",
+    "score.png": "derived:optical:score:v1",
 }
 
 PUBLIC_NAMES = {
@@ -34,6 +40,7 @@ PUBLIC_NAMES = {
     PREVIEW_KEYS["true_color.png"]: "true_color",
     PREVIEW_KEYS["model_view_pca.png"]: "model_view",
     PREVIEW_KEYS["similarity.png"]: "similarity",
+    PREVIEW_KEYS["score.png"]: "score",
     BUNDLE_KEY: "bundle_zip",
     SUMMARY_KEY: "lulc_summary",
     RECORD_KEY: "scene_record",

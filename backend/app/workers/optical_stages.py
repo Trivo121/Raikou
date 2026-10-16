@@ -8,9 +8,10 @@ no frontend change; only the order and the handlers differ:
   validate_upload   cpu      the shared head-check of every source object
   extract_metadata  cpu      dates, clear fractions, grid -> scene metadata
   build_overview    cpu      true-colour JPEG of the clearest date
-  embed_patches     optical  OlmoEarth India model + the full GIS bundle
+  embed_patches     optical  OlmoEarth India model, the full GIS bundle, embeddings
   build_evidence    cpu      the optical scene record and evidence row
-  finalize          cpu      every required artifact present
+  index_vectors     cpu      640 m window vectors -> Qdrant ``optical_patches``
+  finalize          cpu      every required artifact and vector present
 
 Only ``embed_patches`` needs torch and the model; it runs in the optical
 worker's own venv. Everything else runs on the ordinary CPU worker.
@@ -18,24 +19,29 @@ worker's own venv. Everything else runs on the ordinary CPU worker.
 
 from __future__ import annotations
 
+from contextlib import contextmanager
 import csv
 from datetime import datetime, timezone
 import json
 import logging
 from pathlib import Path
 import re
-from typing import Any
+import sys
+from typing import Any, Iterator
 import zipfile
 
+from app.core.config import settings
 from app.services.acquisitions import copernicus
 from app.services.optical.artifacts import (
     BUNDLE_KEY,
+    EMBEDDINGS_KEY,
     OVERVIEW_KEY,
     PREVIEW_KEYS,
     RECORD_KEY,
     SCENE_METADATA_KEY,
     SOURCE_KEY,
     SUMMARY_KEY,
+    WINDOWS_KEY,
     file_key,
     public_name,
 )
@@ -52,7 +58,8 @@ NEXT_STAGE: dict[str, tuple[str, str] | None] = {
     "extract_metadata": ("build_overview", "cpu"),
     "build_overview": ("embed_patches", "optical"),
     "embed_patches": ("build_evidence", "cpu"),
-    "build_evidence": ("finalize", "cpu"),
+    "build_evidence": ("index_vectors", "cpu"),
+    "index_vectors": ("finalize", "cpu"),
     "finalize": None,
     "cleanup": None,
 }
@@ -61,8 +68,9 @@ PROGRESS = {
     "validate_upload": 18,
     "extract_metadata": 22,
     "build_overview": 30,
-    "embed_patches": 85,
-    "build_evidence": 95,
+    "embed_patches": 80,
+    "build_evidence": 90,
+    "index_vectors": 96,
     "finalize": 100,
     "cleanup": 100,
 }
@@ -81,6 +89,7 @@ CONTENT_TYPES = {
 }
 MIN_TIMESTEP_VALID = 0.30  # same threshold the release was evaluated with
 MAX_RENDER_EDGE = 1792
+WINDOW_EMBEDDING = "mean of L2-normalised fine-tuned OlmoEarth encoder tokens over the window, re-normalised"
 
 
 def _slug(text: str, fallback: str = "aoi") -> str:
@@ -103,6 +112,90 @@ def _parse_agreement_csv(path: Path) -> dict[str, Any]:
     return {"classes": classes, "matrix_km2": matrix, "notes": notes}
 
 
+@contextmanager
+def _captured_prediction(bundle: Any) -> Iterator[dict[str, Any]]:
+    """Keep what ``bundle.run_aoi`` gets back from ``predict_tile``.
+
+    run_aoi looks ``predict_tile`` up in its own module when it runs, so
+    wrapping that name for one call hands this stage the blended logits and
+    the encoder features without a second inference pass and without
+    touching the release's code.
+    """
+    original = bundle.predict_tile
+    captured: dict[str, Any] = {}
+
+    def tap(*args: Any, **kwargs: Any) -> dict[str, Any]:
+        out = original(*args, **kwargs)
+        captured.update(out)
+        return out
+
+    bundle.predict_tile = tap
+    try:
+        yield captured
+    finally:
+        bundle.predict_tile = original
+
+
+def _release_gpu_cache() -> None:
+    """Give the T4's cached blocks back to vLLM and the SAR worker after each run."""
+    torch = sys.modules.get("torch")
+    if torch is not None and torch.cuda.is_available():
+        torch.cuda.empty_cache()
+
+
+def _write_probabilities(path: Path, logits: Any, has_data: Any, temperature: float, grid: OpticalGrid, class_names: list[str]) -> None:
+    """Calibrated per-class probability (%) as one COG band per class; 255 = no data."""
+    import numpy as np
+    import rasterio
+    from rasterio.shutil import copy as copy_dataset
+    from rasterio.transform import Affine
+
+    z = np.asarray(logits, np.float32) / float(temperature)
+    z -= z.max(axis=0, keepdims=True)
+    np.exp(z, out=z)
+    z /= z.sum(axis=0, keepdims=True)
+    pct = np.rint(z * 100.0).astype(np.uint8)
+    pct[:, ~np.asarray(has_data, bool)] = 255
+    tmp = path.with_name(path.stem + ".tmp.tif")
+    with rasterio.open(
+        tmp, "w", driver="GTiff", width=grid.width, height=grid.height, count=len(class_names), dtype="uint8",
+        crs=grid.crs, transform=Affine(*grid.transform), nodata=255,
+    ) as dst:
+        dst.write(pct)
+        for band, name in enumerate(class_names, start=1):
+            dst.set_band_description(band, f"P({name}) %")
+        dst.update_tags(
+            MEANING="calibrated probability in percent that the pixel takes each class, before the 4 px sieve; 255 = no data",
+            TEMPERATURE=f"{float(temperature):.4f}",
+        )
+    try:
+        copy_dataset(tmp, path, driver="COG", COMPRESS="DEFLATE", OVERVIEW_RESAMPLING="AVERAGE")
+    finally:
+        tmp.unlink(missing_ok=True)
+
+
+def _write_score_png(path: Path, logits: Any, has_data: Any, temperature: float) -> None:
+    """The calibrated score (top-class probability, 0-100) on the release's viridis, no data transparent."""
+    import numpy as np
+
+    from app.services.optical import embeddings as emb
+
+    z = np.asarray(logits, np.float32) / float(temperature)
+    z -= z.max(axis=0, keepdims=True)
+    np.exp(z, out=z)
+    score = (100.0 / z.sum(axis=0)).astype(np.float32)  # the top class's exp term is 1 after the shift
+    score[~np.asarray(has_data, bool)] = np.nan
+    path.write_bytes(emb.png_bytes(emb.colorize(score, 0.0, 100.0, emb.VIRIDIS_STOPS)))
+
+
+def _read_class_map(path: Path) -> Any:
+    import numpy as np
+    import rasterio
+
+    with rasterio.open(path) as ds:
+        return ds.read(1).astype(np.uint8)
+
+
 class OpticalStagesMixin:
     """Mixed into M3Pipeline; uses its repository, storage and file helpers."""
 
@@ -114,6 +207,7 @@ class OpticalStagesMixin:
             "build_overview": self._optical_build_overview,
             "embed_patches": self._optical_lulc,
             "build_evidence": self._optical_build_evidence,
+            "index_vectors": self._optical_index_vectors,
             "finalize": self._optical_finalize,
         }
 
@@ -435,27 +529,41 @@ class OpticalStagesMixin:
             height=grid.height,
         )
         out_dir = workdir / "bundle"
+        temperature = float((card.get("calibration") or {}).get("temperature") or 1.0)
         heartbeat = _FetchHeartbeat(self.repository, task, worker_id=str(task.get("locked_by") or ""), total_bytes=None)
-        with heartbeat:
-            run = rp.bundle.run_aoi(
-                model,
-                tile,
-                dn,
-                valid,
-                dates,
-                str(out_dir),
-                name,
-                card,
-                bench,
-                temperature=float((card.get("calibration") or {}).get("temperature") or 1.0),
-                use_timesteps=use,
-                amp=lulc_model.amp(),
-            )
+        try:
+            with heartbeat, _captured_prediction(rp.bundle) as captured:
+                run = rp.bundle.run_aoi(
+                    model,
+                    tile,
+                    dn,
+                    valid,
+                    dates,
+                    str(out_dir),
+                    name,
+                    card,
+                    bench,
+                    temperature=temperature,
+                    use_timesteps=use,
+                    amp=lulc_model.amp(),
+                )
+        finally:
+            _release_gpu_cache()
         if heartbeat.lease_lost():
             raise RetryableTaskError("The task lease was lost while running the land-cover model.")
+        if not {"logits", "has_data", "features"} <= set(captured):
+            raise UserFacingTaskError(
+                "OPTICAL_MODEL_OUTPUT_MISSING", "The land-cover model did not hand back its features; the release code may have changed."
+            )
 
         stats = _parse_stats_csv(out_dir / "lulc_stats.csv")
         agreement = _parse_agreement_csv(out_dir / "agreement_matrix.csv")
+        model_info = lulc_model.card_summary()
+        extras = self._optical_extras(
+            task, captured, dn=dn, valid=valid, dates=dates, use=use, out_dir=out_dir, name=name, grid=grid,
+            card=card, temperature=temperature, patch=int(getattr(model, "P", 4)), model_info=model_info,
+        )
+        del captured
 
         zip_path = workdir / f"{name}_gis_bundle.zip"
         with zipfile.ZipFile(zip_path, "w", zipfile.ZIP_DEFLATED) as zf:
@@ -498,7 +606,10 @@ class OpticalStagesMixin:
             "run": run,
             "stats": stats,
             "agreement": agreement,
-            "model": lulc_model.card_summary(),
+            "spectral_indices": extras["spectral_indices"],
+            "embeddings": extras["embeddings"],
+            "windows": extras["windows"],
+            "model": model_info,
             "artifacts": artifacts,
             "generated_at": datetime.now(timezone.utc).isoformat(),
         }
@@ -513,6 +624,102 @@ class OpticalStagesMixin:
             "timesteps_used": use,
             "polygons": run.get("polygons"),
             "raster_format": run.get("raster_format"),
+            "windows": extras["windows"]["count"],
+            "embedding_energy_captured": extras["embeddings"]["energy_captured"],
+        }
+
+    def _optical_extras(
+        self,
+        task: dict[str, Any],
+        captured: dict[str, Any],
+        *,
+        dn: Any,
+        valid: Any,
+        dates: list[str],
+        use: list[int],
+        out_dir: Path,
+        name: str,
+        grid: OpticalGrid,
+        card: dict[str, Any],
+        temperature: float,
+        patch: int,
+        model_info: dict[str, Any],
+    ) -> dict[str, Any]:
+        """Everything Phase 2 adds beside the release's bundle, from the captured model outputs.
+
+        Into the bundle: spectral_indices.csv and a class-probability COG.
+        Kept as internal artifacts: reduced token embeddings (similarity
+        heatmaps) and 640 m window vectors (Qdrant).
+        """
+        import numpy as np
+
+        from app.services.optical import embeddings as emb
+        from app.services.optical.indices import class_index_medians, write_csv
+
+        class_names = [str(c.get("name")) for c in card.get("classes") or []]
+        has_data = np.asarray(captured["has_data"], bool)
+        if not class_names or np.asarray(captured["logits"]).shape[0] != len(class_names):
+            raise UserFacingTaskError("OPTICAL_MODEL_OUTPUT_MISSING", "The model's classes do not match its card.")
+        class_map = _read_class_map(out_dir / f"{name}_lulc_10m.tif")
+
+        spectral = class_index_medians(dn, valid, class_map, class_names, dates, use)
+        write_csv(out_dir / "spectral_indices.csv", spectral)
+        _write_probabilities(
+            out_dir / f"{name}_class_probabilities_10m.tif", captured["logits"], has_data, temperature, grid, class_names
+        )
+        _write_score_png(out_dir / f"{name}_score.png", captured["logits"], has_data, temperature)
+
+        token_valid = emb.token_validity(has_data, patch)
+        tokens = emb.normalize_tokens(captured["features"], token_valid)
+        reduced, basis = emb.reduce_tokens(tokens, token_valid, dims=settings.OPTICAL_EMBEDDING_DIMS)
+        windows = emb.pool_windows(
+            tokens, token_valid, class_map, patch=patch, window=settings.OPTICAL_WINDOW_TOKENS,
+            min_tokens=settings.OPTICAL_WINDOW_MIN_TOKENS, num_classes=len(class_names),
+        )
+        dim = int(tokens.shape[-1])
+        del tokens
+
+        workdir = self._workdir(task)
+        model_fields = {"model_name": model_info.get("name"), "model_version": model_info.get("version")}
+        emb_path = workdir / "embeddings.npz"
+        np.savez(emb_path, reduced=reduced, valid=token_valid)
+        emb_meta = {
+            **basis,
+            **model_fields,
+            "token_px": patch,
+            "token_m": patch * grid.res,
+            "shape": list(reduced.shape),
+            "grid": grid.as_dict(),
+            "basis": "top singular directions of the L2-normalised fine-tuned encoder tokens (uncentred)",
+        }
+        emb_art = self._persist_file(
+            task, kind="other", logical_key=EMBEDDINGS_KEY, path=emb_path, content_type="application/octet-stream", metadata=emb_meta
+        )
+        win_path = workdir / "window_vectors.npz"
+        np.savez(win_path, **windows)
+        window_tokens = settings.OPTICAL_WINDOW_TOKENS
+        win_meta = {
+            **model_fields,
+            "window_count": int(windows["vectors"].shape[0]),
+            "window_tokens": window_tokens,
+            "window_px": window_tokens * patch,
+            "window_m": window_tokens * patch * grid.res,
+            "token_px": patch,
+            "dim": dim,
+            "grid": grid.as_dict(),
+            "class_names": class_names,
+            "dates_used": [dates[i] for i in use],
+            "embedding": WINDOW_EMBEDDING,
+        }
+        win_art = self._persist_file(
+            task, kind="other", logical_key=WINDOWS_KEY, path=win_path, content_type="application/octet-stream", metadata=win_meta
+        )
+        emb_path.unlink(missing_ok=True)
+        win_path.unlink(missing_ok=True)
+        return {
+            "spectral_indices": spectral,
+            "embeddings": {"artifact_id": str(emb_art["id"]), **{k: emb_meta[k] for k in ("dims", "energy_captured", "token_m")}},
+            "windows": {"artifact_id": str(win_art["id"]), "count": win_meta["window_count"], "window_m": win_meta["window_m"], "dim": dim},
         }
 
     # ------------------------------------------------------------------ build_evidence
@@ -548,9 +755,103 @@ class OpticalStagesMixin:
 
     # ------------------------------------------------------------------ finalize
 
+    # ------------------------------------------------------------------ index_vectors
+
+    def _optical_index_vectors(self, task: dict[str, Any]) -> dict[str, Any]:
+        import numpy as np
+
+        from app.services.optical.embeddings import class_shares, window_point_id
+        from app.services.storage.qdrant import QdrantStore
+
+        artifact = self.repository.artifact_by_logical_key(task, WINDOWS_KEY)
+        if artifact is None:
+            raise RetryableTaskError("The optical window vectors have not been persisted yet.")
+        meta = artifact.get("metadata") or {}
+        local = self._download(artifact, self._workdir(task) / "vectors")
+        with np.load(local) as data:
+            vectors = data["vectors"]
+            window_index = data["window_index"]
+            token_bounds = data["token_bounds"]
+            class_counts = data["class_counts"]
+            valid_tokens = data["valid_tokens"]
+        local.unlink(missing_ok=True)
+
+        grid = OpticalGrid.from_dict(meta.get("grid") or {})
+        token_px = int(meta.get("token_px") or 4)
+        class_names = [str(c) for c in meta.get("class_names") or []]
+        model_name = str(meta.get("model_name") or "unknown")
+        model_version = str(meta.get("model_version") or "unknown")
+        pixel_bounds = [tuple(int(v) * token_px for v in bounds) for bounds in token_bounds]
+        boxes = grid.bboxes_lonlat(pixel_bounds)
+
+        points = []
+        for i in range(vectors.shape[0]):
+            shares = class_shares(class_counts[i], class_names)
+            west, south, east, north = boxes[i]
+            r0, r1, c0, c1 = pixel_bounds[i]
+            window_row, window_col = int(window_index[i][0]), int(window_index[i][1])
+            points.append(
+                {
+                    "id": window_point_id(task["scene_id"], model_version, window_row, window_col),
+                    "vector": vectors[i].astype(float).tolist(),
+                    "payload": {
+                        "owner_id": task["owner_id"],
+                        "project_id": task["project_id"],
+                        "scene_id": task["scene_id"],
+                        "window_row": window_row,
+                        "window_col": window_col,
+                        "row_start": r0,
+                        "row_end": r1,
+                        "col_start": c0,
+                        "col_end": c1,
+                        "window_px": int(meta.get("window_px") or settings.OPTICAL_WINDOW_TOKENS * token_px),
+                        "epsg": grid.epsg,
+                        "bbox_lonlat": [west, south, east, north],
+                        "center_lonlat": [round((west + east) / 2, 7), round((south + north) / 2, 7)],
+                        "valid_tokens": int(valid_tokens[i]),
+                        "dates": list(meta.get("dates_used") or []),
+                        "class_shares": shares,
+                        "dominant_class": max(shares, key=shares.get) if shares else None,
+                        "model_name": model_name,
+                        "model_version": model_version,
+                        "embedding": str(meta.get("embedding") or WINDOW_EMBEDDING),
+                    },
+                }
+            )
+
+        store = QdrantStore.get_instance()
+        collection = settings.OPTICAL_QDRANT_COLLECTION
+        try:
+            # Sized from the model (768 for OlmoEarth Base), never assumed.
+            store.initialize_collection(collection, vector_size=int(vectors.shape[1]))
+            # A reprocess may produce different windows; start the scene clean.
+            store.delete_vectors_by_scene(
+                collection, owner_id=str(task["owner_id"]), project_id=str(task["project_id"]), scene_id=str(task["scene_id"])
+            )
+            batch_size = settings.M3_QDRANT_BATCH_SIZE
+            for start in range(0, len(points), batch_size):
+                store.upsert_optical_windows(collection, points[start : start + batch_size])
+        except ValueError as exc:
+            raise UserFacingTaskError("OPTICAL_VECTOR_INVALID", str(exc)) from exc
+        except Exception as exc:
+            raise RetryableTaskError("Qdrant indexing is temporarily unavailable.") from exc
+        return {"collection": collection, "indexed": len(points), "dim": int(vectors.shape[1])}
+
+    # ------------------------------------------------------------------ finalize
+
     def _optical_finalize(self, task: dict[str, Any]) -> dict[str, Any]:
-        required = (OVERVIEW_KEY, RECORD_KEY, SUMMARY_KEY, BUNDLE_KEY, PREVIEW_KEYS["lulc.png"])
-        missing = [k for k in required if self.repository.artifact_by_logical_key(task, k) is None]
+        from app.services.storage.qdrant import QdrantStore
+
+        required = (OVERVIEW_KEY, RECORD_KEY, SUMMARY_KEY, BUNDLE_KEY, PREVIEW_KEYS["lulc.png"], EMBEDDINGS_KEY, WINDOWS_KEY)
+        found = {k: self.repository.artifact_by_logical_key(task, k) for k in required}
+        missing = [k for k, artifact in found.items() if artifact is None]
         if missing:
             raise RetryableTaskError(f"Required optical artifacts are not available yet: {missing}")
-        return {"pipeline": PIPELINE, "completed_at": datetime.now(timezone.utc).isoformat()}
+        expected = int((found[WINDOWS_KEY].get("metadata") or {}).get("window_count") or 0)
+        count = QdrantStore.get_instance().count_vectors_by_scene(
+            settings.OPTICAL_QDRANT_COLLECTION,
+            owner_id=str(task["owner_id"]), project_id=str(task["project_id"]), scene_id=str(task["scene_id"]),
+        )
+        if count < expected:
+            raise RetryableTaskError(f"Only {count} of {expected} optical window vectors are indexed yet.")
+        return {"pipeline": PIPELINE, "vector_count": count, "completed_at": datetime.now(timezone.utc).isoformat()}

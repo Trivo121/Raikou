@@ -123,6 +123,32 @@ def test_limitations_follow_the_run():
     assert "outside India" in abroad and "outside India" not in cloudy_single
 
 
+def test_spectral_and_similarity_sections_carry_the_run_outputs():
+    summary = {
+        **_summary(),
+        "spectral_indices": [{"date": "2026-04-12", "class_name": "Built-up", "clear_pixels": 900, "ndvi_median": 0.12}],
+        "embeddings": {"artifact_id": "a1", "dims": 64, "energy_captured": 0.93, "token_m": 40.0},
+        "windows": {"artifact_id": "a2", "count": 240, "window_m": 640.0, "dim": 768},
+    }
+
+    record = build_optical_record(scene=SCENE, acquisition=None, summary=summary)
+
+    assert record["spectral"]["rows"][0]["ndvi_median"] == 0.12
+    assert record["spectral"]["indices"]["ndvi"] == "(B08 - B04) / (B08 + B04)"
+    similarity = record["similarity"]
+    assert similarity["available"] is True and similarity["label"] == "Looks similar to the model"
+    assert (similarity["energy_captured"], similarity["indexed_windows"], similarity["window_m"]) == (0.93, 240, 640.0)
+    assert "not field measurements" in " ".join(record["limitations"])
+
+
+def test_a_run_from_before_phase_two_says_similarity_is_unavailable():
+    record = _record()
+
+    assert record["similarity"]["available"] is False
+    assert record["spectral"]["rows"] == []
+    assert "NDVI" not in " ".join(record["limitations"])
+
+
 def test_seasonal_flooding_is_flagged_only_when_the_map_has_water():
     with_water = " ".join(_record()["limitations"])
     dry_stats = [dict(row, **({"share_of_mapped_%": "0.0"} if row["class_id"] == "5" else {})) for row in STATS]

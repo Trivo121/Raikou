@@ -170,14 +170,54 @@ function extentKm(bbox) {
 
 const round = (n) => Math.round(n * 10000) / 10000;
 
+function markerFeature(marker) {
+  if (!marker || !Number.isFinite(marker.lng) || !Number.isFinite(marker.lat)) return EMPTY;
+  return {
+    type: 'FeatureCollection',
+    features: [{ type: 'Feature', properties: {}, geometry: { type: 'Point', coordinates: [marker.lng, marker.lat] } }],
+  };
+}
+
+// An overlay image is placed by its four corners, top-left first and clockwise,
+// which is exactly the order the optical API returns them in.
+function validCorners(corners) {
+  return Array.isArray(corners) && corners.length === 4
+    && corners.every((c) => Array.isArray(c) && Number.isFinite(c[0]) && Number.isFinite(c[1]));
+}
+
 /**
  * The AOI map. Purely presentational: it owns the maplibre instance and
  * reports a bounding box out, and knows nothing about searching or scenes.
  *
+ * Optional extras for the optical page, all inert when omitted:
+ * - `overlays`: georeferenced images ({ id, label, url, corners }) drawn under
+ *   the AOI, one visible at a time (`activeOverlayId` / `onOverlayChange`),
+ *   with an opacity slider;
+ * - `clickMode` + `onMapClick`: a plain click reports its lng/lat instead of
+ *   selecting a footprint (used for "find similar areas");
+ * - `marker`: one highlighted point; `focusBox`: a box to frame when it changes;
+ * - `helpText`: replaces the Sentinel-1 sizing note under the coordinates.
+ *
  * No React wrapper library. `react-map-gl` would add a dependency and a
  * version coupling for what is one `useEffect` driving an imperative API.
  */
-export default function AoiMapPicker({ value, onChange, footprints, selectedId, onSelect }) {
+export default function AoiMapPicker({
+  value,
+  onChange,
+  footprints,
+  selectedId,
+  onSelect,
+  overlays,
+  activeOverlayId = null,
+  onOverlayChange,
+  clickMode = false,
+  onMapClick,
+  marker = null,
+  focusBox = null,
+  helpText,
+  heightClass = 'h-[22rem]',
+  drawable = true,
+}) {
   const containerRef = useRef(null);
   const mapRef = useRef(null);
   const drawStartRef = useRef(null);
@@ -185,14 +225,19 @@ export default function AoiMapPicker({ value, onChange, footprints, selectedId, 
   const armedRef = useRef(false);
   // Handlers are attached once to the map; reading them from a ref keeps the
   // map from being torn down and rebuilt whenever a parent re-renders.
-  const callbacksRef = useRef({ onChange, onSelect });
-  callbacksRef.current = { onChange, onSelect };
+  const callbacksRef = useRef({ onChange, onSelect, onMapClick });
+  callbacksRef.current = { onChange, onSelect, onMapClick };
   const valueRef = useRef(value);
   valueRef.current = value;
+  const clickModeRef = useRef(clickMode);
+  clickModeRef.current = clickMode;
+  // id -> { url, key } of the image sources currently on the map.
+  const overlaysOnMapRef = useRef(new Map());
 
   const [ready, setReady] = useState(false);
   const [armed, setArmed] = useState(false);
   const [basemap, setBasemap] = useState('s2');
+  const [overlayOpacity, setOverlayOpacity] = useState(0.85);
   // Text drafts for the coordinate boxes, so a half-typed "-" or "12." is not
   // rejected mid-keystroke.
   const [draft, setDraft] = useState(null);
@@ -306,8 +351,27 @@ export default function AoiMapPicker({ value, onChange, footprints, selectedId, 
         },
       });
 
+      // One highlighted point (the "find similar" seed), above everything.
+      map.addSource('marker', { type: 'geojson', data: EMPTY, tolerance: 0 });
+      map.addLayer({
+        id: 'marker',
+        type: 'circle',
+        source: 'marker',
+        paint: {
+          'circle-radius': 7,
+          'circle-color': '#f472b6',
+          'circle-stroke-width': 2.5,
+          'circle-stroke-color': '#0b0b0e',
+        },
+      });
+
+      map.on('click', (event) => {
+        if (!clickModeRef.current || armedRef.current || dragCornerRef.current) return;
+        callbacksRef.current.onMapClick?.({ lng: event.lngLat.lng, lat: event.lngLat.lat });
+      });
+
       map.on('click', 'footprints-fill', (event) => {
-        if (armedRef.current || dragCornerRef.current) return;
+        if (armedRef.current || dragCornerRef.current || clickModeRef.current) return;
         const productId = event.features?.[0]?.properties?.productId;
         if (productId) callbacksRef.current.onSelect?.(String(productId));
       });
@@ -450,6 +514,78 @@ export default function AoiMapPicker({ value, onChange, footprints, selectedId, 
     if (source) source.setData(footprintCollection(footprints, selectedId));
   }, [ready, footprints, selectedId]);
 
+  // Overlays: add, move or drop image sources to match the prop, then show the
+  // active one. Each source starts loading its image as soon as it is added,
+  // visible or not, so a short-lived signed URL is used while it is still valid.
+  useEffect(() => {
+    const map = mapRef.current;
+    if (!ready || !map) return;
+    const wanted = new Map((overlays || []).filter((o) => o?.id && o?.url && validCorners(o.corners)).map((o) => [o.id, o]));
+    const onMap = overlaysOnMapRef.current;
+    onMap.forEach((_, id) => {
+      if (wanted.has(id)) return;
+      if (map.getLayer(`ov-${id}`)) map.removeLayer(`ov-${id}`);
+      if (map.getSource(`ov-${id}`)) map.removeSource(`ov-${id}`);
+      onMap.delete(id);
+    });
+    wanted.forEach((overlay, id) => {
+      const key = `${overlay.url}|${JSON.stringify(overlay.corners)}`;
+      const sourceId = `ov-${id}`;
+      const existing = map.getSource(sourceId);
+      if (!existing) {
+        map.addSource(sourceId, { type: 'image', url: overlay.url, coordinates: overlay.corners });
+        // Under the footprints and the AOI, so the box stays readable on top.
+        map.addLayer({
+          id: sourceId,
+          type: 'raster',
+          source: sourceId,
+          layout: { visibility: 'none' },
+          // Nearest keeps 10 m class pixels crisp instead of smearing borders.
+          paint: { 'raster-opacity': overlayOpacity, 'raster-resampling': 'nearest', 'raster-fade-duration': 0 },
+        }, 'footprints-fill');
+      } else if (onMap.get(id)?.key !== key) {
+        existing.updateImage({ url: overlay.url, coordinates: overlay.corners });
+      }
+      onMap.set(id, { key });
+    });
+    onMap.forEach((_, id) => {
+      map.setLayoutProperty(`ov-${id}`, 'visibility', id === activeOverlayId ? 'visible' : 'none');
+    });
+    // overlayOpacity is applied by its own effect below.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [ready, overlays, activeOverlayId]);
+
+  useEffect(() => {
+    const map = mapRef.current;
+    if (!ready || !map) return;
+    overlaysOnMapRef.current.forEach((_, id) => {
+      if (map.getLayer(`ov-${id}`)) map.setPaintProperty(`ov-${id}`, 'raster-opacity', overlayOpacity);
+    });
+  }, [ready, overlayOpacity]);
+
+  useEffect(() => {
+    const map = mapRef.current;
+    if (!ready || !map) return;
+    map.getSource('marker')?.setData(markerFeature(marker));
+  }, [ready, marker]);
+
+  useEffect(() => {
+    const map = mapRef.current;
+    if (!ready || !map) return;
+    map.getCanvas().style.cursor = clickMode ? 'crosshair' : '';
+  }, [ready, clickMode]);
+
+  const focusKey = focusBox ? JSON.stringify(focusBox) : '';
+  useEffect(() => {
+    const map = mapRef.current;
+    if (!ready || !map || !focusBox) return;
+    const { west, south, east, north } = focusBox;
+    if (![west, south, east, north].every(Number.isFinite)) return;
+    map.fitBounds(new LngLatBounds([west, south], [east, north]), { padding: 40, duration: 500 });
+    // Re-frame only when the box itself changes, not on every render.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [ready, focusKey]);
+
   useEffect(() => {
     const map = mapRef.current;
     if (!ready || !map) return;
@@ -545,9 +681,11 @@ export default function AoiMapPicker({ value, onChange, footprints, selectedId, 
         <p className="text-[11px] text-zinc-500">
           {armed
             ? 'Drag on the map to draw your area.'
-            : value
-              ? 'Drag a corner to adjust, or type exact edges below.'
-              : 'Draw an area to search.'}
+            : clickMode
+              ? 'Click a spot on the map.'
+              : value
+                ? 'Drag a corner to adjust, or type exact edges below.'
+                : 'Draw an area to search.'}
         </p>
         <div className="flex flex-wrap items-center gap-1.5">
           <div className="mr-1 inline-flex items-center gap-1 rounded-md border border-white/[0.1] p-0.5" role="group" aria-label="Basemap">
@@ -565,15 +703,17 @@ export default function AoiMapPicker({ value, onChange, footprints, selectedId, 
               </button>
             ))}
           </div>
-          <button
-            type="button"
-            onClick={armDrawing}
-            disabled={armed}
-            className="inline-flex items-center gap-1.5 rounded-md border border-sky-400/25 bg-sky-400/10 px-2.5 py-1.5 text-[11px] font-semibold text-sky-200 transition hover:bg-sky-400/20 disabled:cursor-not-allowed disabled:opacity-45"
-          >
-            <Square size={12} /> {armed ? 'Drawing...' : value ? 'Redraw' : 'Draw area'}
-          </button>
-          {value && (
+          {drawable && (
+            <button
+              type="button"
+              onClick={armDrawing}
+              disabled={armed}
+              className="inline-flex items-center gap-1.5 rounded-md border border-sky-400/25 bg-sky-400/10 px-2.5 py-1.5 text-[11px] font-semibold text-sky-200 transition hover:bg-sky-400/20 disabled:cursor-not-allowed disabled:opacity-45"
+            >
+              <Square size={12} /> {armed ? 'Drawing...' : value ? 'Redraw' : 'Draw area'}
+            </button>
+          )}
+          {drawable && value && (
             <button
               type="button"
               onClick={clearArea}
@@ -585,13 +725,54 @@ export default function AoiMapPicker({ value, onChange, footprints, selectedId, 
         </div>
       </div>
 
-      <div ref={containerRef} className="h-[22rem] w-full" role="application" aria-label="Area of interest map" />
+      {overlays?.length > 0 && (
+        <div className="flex flex-wrap items-center gap-2 border-b border-white/[0.07] px-3 py-2">
+          <div className="inline-flex flex-wrap items-center gap-1 rounded-md border border-white/[0.1] p-0.5" role="group" aria-label="Map layer">
+            <button
+              type="button"
+              onClick={() => onOverlayChange?.(null)}
+              aria-pressed={!activeOverlayId}
+              className={`rounded px-2 py-1 text-[11px] font-semibold transition ${!activeOverlayId ? 'bg-white/[0.12] text-white' : 'text-zinc-400 hover:text-zinc-200'}`}
+            >
+              Basemap
+            </button>
+            {overlays.map((overlay) => (
+              <button
+                key={overlay.id}
+                type="button"
+                onClick={() => onOverlayChange?.(overlay.id)}
+                aria-pressed={activeOverlayId === overlay.id}
+                className={`rounded px-2 py-1 text-[11px] font-semibold transition ${activeOverlayId === overlay.id ? 'bg-sky-400/20 text-sky-100' : 'text-zinc-400 hover:text-zinc-200'}`}
+              >
+                {overlay.label}
+              </button>
+            ))}
+          </div>
+          {activeOverlayId && (
+            <label className="ml-auto flex items-center gap-2 text-[11px] text-zinc-500">
+              Opacity
+              <input
+                type="range"
+                min="0.2"
+                max="1"
+                step="0.05"
+                value={overlayOpacity}
+                onChange={(event) => setOverlayOpacity(Number(event.target.value))}
+                className="w-24 accent-sky-400"
+                aria-label="Layer opacity"
+              />
+            </label>
+          )}
+        </div>
+      )}
+
+      <div ref={containerRef} className={`${heightClass} w-full`} role="application" aria-label="Area of interest map" />
 
       {/* The numeric edges are the answer to "is my box actually where I think
           it is?" -- a drawn rectangle on a photograph is not verifiable by
           eye, and a typed coordinate is. They double as the edit control for
           anyone who has a precise extent already. */}
-      {value && (
+      {drawable && value && (
         <div className="border-t border-white/[0.07] px-3 py-2.5">
           <div className="flex flex-wrap items-end gap-2">
             {[
@@ -620,7 +801,12 @@ export default function AoiMapPicker({ value, onChange, footprints, selectedId, 
               Zoom to area
             </button>
           </div>
-          {span && (
+          {span && helpText !== undefined && (
+            <div className="mt-2 text-[11px] text-zinc-500">
+              {typeof helpText === 'function' ? helpText(span) : helpText}
+            </div>
+          )}
+          {span && helpText === undefined && (
             <p className="mt-2 text-[11px] text-zinc-500">
               Roughly <span className="font-mono text-zinc-300">{span.width.toFixed(0)} x {span.height.toFixed(0)} km</span>
               {' '}&middot; a Sentinel-1 IW frame covers about 250 x 170 km, so this box picks

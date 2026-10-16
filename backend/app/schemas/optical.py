@@ -157,6 +157,73 @@ class OpticalRunCreateResponse(BaseModel):
     replayed: bool = False
 
 
+class OpticalSimilarScope(str, Enum):
+    """``run``: a heatmap over this run. ``library``: nearest 640 m windows in the caller's other runs."""
+
+    RUN = "run"
+    LIBRARY = "library"
+
+
+class OpticalSimilarRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    lon: float = Field(ge=-180.0, le=180.0)
+    lat: float = Field(ge=-90.0, le=90.0)
+    scope: OpticalSimilarScope = OpticalSimilarScope.RUN
+    limit: int | None = Field(default=None, ge=1, le=100)
+
+
+class OpticalSeedRead(BaseModel):
+    lon: float
+    lat: float
+    token_row: int
+    token_col: int
+    token_m: float
+    window_row: int | None = None
+    window_col: int | None = None
+
+
+class OpticalHeatmapRead(BaseModel):
+    # A PNG the size of the token grid (one pixel per 40 m token); place it on
+    # the map with corners_lonlat (top-left, top-right, bottom-right, bottom-left).
+    data_url: str
+    width: int
+    height: int
+    corners_lonlat: list[list[float]]
+    value_range: list[float]
+    colormap: str
+
+
+class OpticalSimilarAreaRead(BaseModel):
+    threshold: float
+    area_sqkm: float
+    share_pct: float
+
+
+class OpticalWindowMatchRead(BaseModel):
+    scene_id: UUID
+    scene_name: str | None = None
+    score: float | None = None
+    bbox_lonlat: list[float]
+    center_lonlat: list[float]
+    dates: list[str] = Field(default_factory=list)
+    dominant_class: str | None = None
+    class_shares: dict[str, float] = Field(default_factory=dict)
+
+
+class OpticalSimilarResponse(BaseModel):
+    scope: OpticalSimilarScope
+    label: str
+    meaning: str
+    seed: OpticalSeedRead
+    image: OpticalHeatmapRead | None = None
+    areas: list[OpticalSimilarAreaRead] = Field(default_factory=list)
+    seed_window: OpticalWindowMatchRead | None = None
+    matches: list[OpticalWindowMatchRead] = Field(default_factory=list)
+    basis: dict[str, Any] = Field(default_factory=dict)
+    notes: list[str] = Field(default_factory=list)
+
+
 class OpticalRunDetail(OpticalRunRead):
     # logical name -> artifact id, for previews (POST /artifacts/{id}/preview)
     # and downloads (POST /artifacts/{id}/download).

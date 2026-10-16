@@ -9,6 +9,7 @@ import {
   Plus,
   Radar,
   Search,
+  Trees,
   Users,
   X,
 } from 'lucide-react';
@@ -27,6 +28,12 @@ function formatDate(value) {
 
 function projectName(project) {
   return project.name || project.title || 'Untitled project';
+}
+
+// The optical page creates and owns one project per user, marked in its
+// description; it opens on /optical rather than the SAR workspace.
+function isOpticalProject(project) {
+  return String(project?.description || '').includes('raikou:optical-workspace');
 }
 
 /* ─── Project Card ─────────────────────────────────────────────────────────── */
@@ -199,6 +206,20 @@ export default function Dashboard() {
 
             <div className="my-1.5 h-px bg-white/[0.05]" />
 
+            <p className="mb-1 mt-2 px-2.5 text-[10px] font-semibold uppercase tracking-wider text-zinc-600">
+              Tools
+            </p>
+            <button
+              type="button"
+              onClick={() => navigate('/optical')}
+              className="w-full flex items-center gap-2.5 rounded-lg px-2.5 py-2 text-left text-[12px] font-medium text-zinc-500 hover:bg-white/[0.04] hover:text-zinc-300 transition-all duration-150"
+            >
+              <Trees size={14} className="text-emerald-400/80" />
+              Optical land cover
+            </button>
+
+            <div className="my-1.5 h-px bg-white/[0.05]" />
+
             <button
               type="button"
               onClick={() => setIsCreating(true)}
@@ -350,7 +371,7 @@ export default function Dashboard() {
                     <ProjectCard
                       key={project.id}
                       project={project}
-                      onClick={() => navigate(`/projects/${project.id}`)}
+                      onClick={() => navigate(isOpticalProject(project) ? '/optical' : `/projects/${project.id}`)}
                     />
                   ))}
                 </div>

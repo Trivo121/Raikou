@@ -7,15 +7,17 @@ the mismatch would show up as a job stuck mid-run instead of failing here.
 
 from __future__ import annotations
 
+import inspect
 from pathlib import Path
 import re
 
 import pytest
 
+from app.core.config import settings
 from app.schemas.jobs import ProcessingJobStage
 from app.services.jobs.publisher import EXECUTION_CLASSES
 from app.workers import optical_stages, stages
-from app.workers.repository import UserFacingTaskError
+from app.workers.repository import UserFacingTaskError, WorkerRepository
 
 MIGRATIONS = Path(__file__).resolve().parents[2] / "supabase" / "migrations"
 OPTICAL_MIGRATION = MIGRATIONS / "20261016001000_m9_optical_acquisitions.sql"
@@ -99,6 +101,13 @@ def test_only_the_model_stage_is_queued_for_the_optical_worker():
     assert queued == ["embed_patches"]
 
 
+def test_vectors_are_indexed_after_the_record_and_before_finalize():
+    chain = _chain()
+
+    assert chain.index("build_evidence") < chain.index("index_vectors") < chain.index("finalize")
+    assert optical_stages.NEXT_STAGE["build_evidence"] == ("index_vectors", "cpu")
+
+
 def test_the_database_queues_the_first_stage_on_cpu():
     sql = OPTICAL_MIGRATION.read_text(encoding="utf-8")
 
@@ -152,7 +161,7 @@ def test_a_stage_runs_the_handler_and_next_stage_of_its_scene_pipeline(monkeypat
     pipeline.repository = _Scenes({})
     sar = pipeline.run({**TASK, "stage": "embed_patches"})
 
-    assert (optical.result, optical.next_stage, optical.progress) == ({"ran": "optical"}, ("build_evidence", "cpu"), 85)
+    assert (optical.result, optical.next_stage, optical.progress) == ({"ran": "optical"}, ("build_evidence", "cpu"), 80)
     assert (sar.result, sar.next_stage) == ({"ran": "sar"}, ("index_vectors", "cpu"))
 
 
@@ -165,3 +174,34 @@ def test_an_optical_scene_refuses_a_sar_only_stage(monkeypatch):
         pipeline.run({**TASK, "stage": "tile_patches"})
 
     assert info.value.code == "UNSUPPORTED_STAGE"
+
+
+class _CleanupStore:
+    def __init__(self) -> None:
+        self.deleted: list[tuple[str, str]] = []
+
+    def delete_vectors_by_scene(self, collection_name, *, owner_id, project_id, scene_id):
+        self.deleted.append((collection_name, scene_id))
+
+
+class _CleanupRepository:
+    def artifacts_for_cleanup(self, task, *, include_sources):
+        inspect.signature(WorkerRepository.artifacts_for_cleanup).bind(None, task, include_sources=include_sources)
+        return []
+
+    def mark_artifacts_deleted(self, artifact_ids):
+        inspect.signature(WorkerRepository.mark_artifacts_deleted).bind(None, artifact_ids)
+
+    def clear_derived_scene_records(self, task):
+        inspect.signature(WorkerRepository.clear_derived_scene_records).bind(None, task)
+
+
+def test_cleanup_removes_a_scene_from_both_vector_collections(monkeypatch):
+    store = _CleanupStore()
+    monkeypatch.setattr(stages.QdrantStore, "get_instance", staticmethod(lambda: store))
+    pipeline = _bare_pipeline()
+    pipeline.repository = _CleanupRepository()
+
+    pipeline._delete_external_state(TASK, include_sources=False)
+
+    assert store.deleted == [(settings.QDRANT_COLLECTION, "scene-1"), (settings.OPTICAL_QDRANT_COLLECTION, "scene-1")]

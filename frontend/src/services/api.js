@@ -30,6 +30,12 @@ export const apiPaths = {
   sceneReprocess: (sceneId) => `/api/v1/scenes/${encodeURIComponent(sceneId)}/reprocess`,
   sceneArtifacts: (sceneId) => `/api/v1/scenes/${encodeURIComponent(sceneId)}/artifacts`,
   artifactPreview: (artifactId) => `/api/v1/artifacts/${encodeURIComponent(artifactId)}/preview`,
+  artifactDownload: (artifactId) => `/api/v1/artifacts/${encodeURIComponent(artifactId)}/download`,
+  opticalProviders: '/api/v1/optical/providers',
+  opticalSearch: '/api/v1/optical/search',
+  opticalRuns: '/api/v1/optical/runs',
+  opticalRun: (sceneId) => `/api/v1/optical/runs/${encodeURIComponent(sceneId)}`,
+  opticalSimilar: (sceneId) => `/api/v1/optical/runs/${encodeURIComponent(sceneId)}/similar`,
   patch: (patchId) => `/api/v1/patches/${encodeURIComponent(patchId)}`,
   evidenceSearch: '/api/v1/search',
   projectConversations: (projectId, sceneId) => {
@@ -368,6 +374,34 @@ export function createApiClient(getAccessToken) {
       },
       async preview(artifactId, { signal } = {}) {
         return unwrapEntity(await request(apiPaths.artifactPreview(artifactId), { method: 'POST', signal }), ['preview', 'data']);
+      },
+      // A short-lived attachment URL (Content-Disposition: attachment).
+      async download(artifactId, { signal } = {}) {
+        return unwrapEntity(await request(apiPaths.artifactDownload(artifactId), { method: 'POST', signal }), ['download', 'data']);
+      },
+    },
+    optical: {
+      // Availability, limits, this month's processing-unit budget and the
+      // model card's held-out agreement figures.
+      providers({ signal } = {}) {
+        return request(apiPaths.opticalProviders, { signal });
+      },
+      // Proxied Copernicus catalogue search, like acquisitions.search.
+      search(input, { signal, timeoutMs = ACQUISITION_SEARCH_TIMEOUT_MS } = {}) {
+        return request(apiPaths.opticalSearch, { method: 'POST', body: JSON.stringify(input), signal, timeoutMs });
+      },
+      // Re-checks every chosen product with Copernicus before queueing.
+      startRun(input, { signal, timeoutMs = ACQUISITION_SEARCH_TIMEOUT_MS } = {}) {
+        return request(apiPaths.opticalRuns, { method: 'POST', body: JSON.stringify(input), signal, timeoutMs });
+      },
+      async listRuns({ signal } = {}) {
+        return unwrapCollection(await request(apiPaths.opticalRuns, { signal }), ['runs', 'items', 'data']);
+      },
+      getRun(sceneId, { signal } = {}) {
+        return request(apiPaths.opticalRun(sceneId), { signal });
+      },
+      similar(sceneId, input, { signal } = {}) {
+        return request(apiPaths.opticalSimilar(sceneId), { method: 'POST', body: JSON.stringify(input), signal });
       },
     },
     jobs: {

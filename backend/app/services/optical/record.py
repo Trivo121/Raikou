@@ -13,6 +13,10 @@ from __future__ import annotations
 from datetime import datetime, timezone
 from typing import Any
 
+from app.services.optical.embeddings import LABEL as SIMILAR_LABEL
+from app.services.optical.embeddings import MEANING as SIMILAR_MEANING
+from app.services.optical.indices import INDICES
+
 RECORD_TYPE = "optical_scene_analysis"
 SCHEMA_VERSION = 1
 
@@ -100,6 +104,14 @@ def build_optical_record(*, scene: dict[str, Any], acquisition: dict[str, Any] |
             "the image date shows it flooded, while WorldCover 2021 may call it bare land or cropland, so agreement "
             "on water varies with the date."
         )
+    spectral_rows = summary.get("spectral_indices") or []
+    if spectral_rows:
+        limitations.append(
+            "NDVI, MNDWI and NDBI medians describe the image on each date over clear pixels of each mapped class; "
+            "they are not field measurements."
+        )
+    embeddings = summary.get("embeddings") or {}
+    windows = summary.get("windows") or {}
 
     agreement = summary.get("agreement") or {}
     return {
@@ -151,6 +163,21 @@ def build_optical_record(*, scene: dict[str, Any], acquisition: dict[str, Any] |
             "columns": "this map",
             "class_order": agreement.get("classes"),
             "is_change_detection": False,
+        },
+        "spectral": {
+            "indices": {name: f"({a} - {b}) / ({a} + {b})" for name, (a, b) in INDICES.items()},
+            "rows": spectral_rows,
+            "basis": "medians over pixels clear on that date (Sentinel-2 SCL) and mapped to that class; harmonised L2A",
+        },
+        "similarity": {
+            "available": bool(embeddings),
+            "label": SIMILAR_LABEL,
+            "meaning": SIMILAR_MEANING,
+            "token_m": embeddings.get("token_m"),
+            "window_m": windows.get("window_m"),
+            "basis_dims": embeddings.get("dims"),
+            "energy_captured": embeddings.get("energy_captured"),
+            "indexed_windows": windows.get("count"),
         },
         "provenance": {
             "attribution": model.get("attribution") or {},
