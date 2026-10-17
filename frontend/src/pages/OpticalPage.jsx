@@ -30,6 +30,9 @@ import { createClientRequestId } from '../utils/helpers';
 
 const TERMINAL = new Set(['ready', 'failed', 'cancelled']);
 
+// New runs map one clear date. Seasonal-stack runs made earlier still open and read as before.
+const RUN_MODE = 'single_date';
+
 // Map layers a finished run offers, in switcher order. Keys are the public
 // artifact names from GET /optical/runs/{id}.
 const LAYERS = [
@@ -101,28 +104,6 @@ function boxOfCorners(corners) {
   return { west: Math.min(...lons), south: Math.min(...lats), east: Math.max(...lons), north: Math.max(...lats) };
 }
 
-// "MM-DD" windows never cross the new year (Oct-Nov, Jan-Feb, Apr-May), so a
-// string comparison is enough.
-function seasonOf(sensingStart, seasons) {
-  const monthDay = String(sensingStart || '').slice(5, 10);
-  return (seasons || []).find((s) => s.start_month_day <= monthDay && monthDay <= s.end_month_day)?.name || null;
-}
-
-function readableSeason(name) {
-  return { post_monsoon: 'Post-monsoon', rabi: 'Rabi (winter crop)', summer: 'Summer' }[name] || name;
-}
-
-// The clearest covering date in each season window, for a seasonal stack.
-function suggestStack(items, seasons) {
-  const usable = items.filter((item) => item.online && item.covers_aoi !== false);
-  const picks = (seasons || [])
-    .map((season) => usable
-      .filter((item) => seasonOf(item.sensing_start, seasons) === season.name)
-      .sort((a, b) => (a.cloud_cover ?? 100) - (b.cloud_cover ?? 100))[0])
-    .filter(Boolean);
-  return picks.sort((a, b) => String(a.sensing_start).localeCompare(String(b.sensing_start))).map((item) => item.product_id);
-}
-
 function suggestSingle(items) {
   const best = items
     .filter((item) => item.online && item.covers_aoi !== false)
@@ -180,21 +161,6 @@ function StatusChip({ status }) {
   );
 }
 
-function ModeChip({ label, detail, selected, disabled, onSelect }) {
-  return (
-    <button
-      type="button"
-      onClick={onSelect}
-      disabled={disabled}
-      aria-pressed={selected}
-      className={`rounded-lg border px-3 py-2 text-left transition disabled:cursor-not-allowed disabled:opacity-45 ${selected ? 'border-sky-400/50 bg-sky-400/[0.08]' : 'border-white/[0.08] bg-black/10 hover:border-sky-400/30'}`}
-    >
-      <span className="block text-xs font-semibold text-zinc-100">{label}</span>
-      <span className="mt-0.5 block text-[11px] text-zinc-500">{detail}</span>
-    </button>
-  );
-}
-
 function Legend({ layer, classes }) {
   if (layer === 'lulc' || layer === 'worldcover2021') {
     return (
@@ -239,8 +205,7 @@ function Legend({ layer, classes }) {
 
 function NewRunPanel({ api, providers, onStarted }) {
   const [bbox, setBbox] = useState(null);
-  const [mode, setMode] = useState('seasonal_stack');
-  const [startDate, setStartDate] = useState(daysAgo(365));
+  const [startDate, setStartDate] = useState(daysAgo(90));
   const [endDate, setEndDate] = useState(isoDay(new Date()));
   const [maxCloud, setMaxCloud] = useState(Number(providers?.default_max_cloud ?? 20));
   const [selected, setSelected] = useState([]);
@@ -254,32 +219,26 @@ function NewRunPanel({ api, providers, onStarted }) {
   });
 
   const items = search.data?.items || [];
-  const seasons = providers?.seasons || [];
-  const isStack = mode === 'seasonal_stack';
-  const cap = isStack ? providers?.max_side_km_stack : providers?.max_side_km_single;
+  const cap = providers?.max_side_km_single;
   const span = spanKm(bbox);
   const tooBig = Boolean(span && cap && (span.width > cap || span.height > cap));
-  const grid = isStack ? search.data?.grid_seasonal_stack : search.data?.grid_single_date;
+  const grid = search.data?.grid_single_date;
   const cost = grid ? grid.processing_units_per_date * Math.max(1, selected.length) : null;
   const budget = providers?.budget;
   const left = budget ? Math.max(0, budget.user_month_cap - budget.user_used) : null;
   const overBudget = cost !== null && left !== null && cost > left;
 
-  // A new search, mode or box resets the picks to the suggestion.
+  // A new search or box resets the pick to the suggestion.
   useEffect(() => {
     if (!search.isSuccess) return;
-    setSelected(isStack ? suggestStack(items, seasons) : suggestSingle(items));
+    setSelected(suggestSingle(items));
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [search.data, isStack]);
+  }, [search.data]);
 
   const toggle = (productId) => {
     const item = items.find((i) => i.product_id === productId);
     if (!item?.online) return;
-    setSelected((current) => {
-      if (current.includes(productId)) return current.filter((id) => id !== productId);
-      if (!isStack) return [productId];
-      return current.length >= 3 ? current : [...current, productId];
-    });
+    setSelected((current) => (current.includes(productId) ? current.filter((id) => id !== productId) : [productId]));
   };
 
   const submitSearch = (event) => {
@@ -293,12 +252,12 @@ function NewRunPanel({ api, providers, onStarted }) {
 
   const startRun = () => {
     if (!bbox || !selected.length || start.isPending || !grid || overBudget) return;
-    // One id per (box, mode, dates) choice, stable across retries of that choice.
-    const key = JSON.stringify([bbox, mode, [...selected].sort()]);
+    // One id per (box, dates) choice, stable across retries of that choice.
+    const key = JSON.stringify([bbox, RUN_MODE, [...selected].sort()]);
     if (requestRef.current.key !== key) requestRef.current = { key, value: createClientRequestId() };
     start.mutate({
       aoi: { west: bbox.west, south: bbox.south, east: bbox.east, north: bbox.north },
-      mode,
+      mode: RUN_MODE,
       product_ids: selected,
       client_request_id: requestRef.current.value,
       ...(name.trim() ? { name: name.trim().slice(0, 120) } : {}),
@@ -318,29 +277,10 @@ function NewRunPanel({ api, providers, onStarted }) {
           helpText={(s) => (
             <span>
               Roughly <span className="font-mono text-zinc-300">{s.width.toFixed(1)} x {s.height.toFixed(1)} km</span>. Mapped at
-              10 m on its own UTM grid: up to {providers?.max_side_km_single ?? 24} km a side for one date,
-              {' '}{providers?.max_side_km_stack ?? 15} km for a three-season stack.
+              10 m on its own UTM grid: up to {providers?.max_side_km_single ?? 24} km a side.
             </span>
           )}
         />
-
-        <fieldset>
-          <legend className="mb-2 text-[11px] font-semibold text-zinc-400">Imagery</legend>
-          <div className="grid gap-2 sm:grid-cols-2">
-            <ModeChip
-              label="Seasonal stack (recommended)"
-              detail="Up to three clear dates, one per season: the model sees the crop calendar."
-              selected={isStack}
-              onSelect={() => { setMode('seasonal_stack'); setStartDate(daysAgo(365)); }}
-            />
-            <ModeChip
-              label="Single date"
-              detail="One clear date. Faster and cheaper; cropland vs bare land is less reliable."
-              selected={!isStack}
-              onSelect={() => { setMode('single_date'); setStartDate(daysAgo(90)); }}
-            />
-          </div>
-        </fieldset>
 
         <div className="grid gap-3 sm:grid-cols-[1fr_1fr_1fr_auto] sm:items-end">
           <label className="text-[11px] font-semibold text-zinc-400">From
@@ -364,7 +304,7 @@ function NewRunPanel({ api, providers, onStarted }) {
         {!bbox && <Notice>Draw the area you want mapped. Indian areas only: the model was trained and checked there.</Notice>}
         {tooBig && (
           <Notice tone="warn" icon={CircleAlert}>
-            This area is about {span.width.toFixed(1)} x {span.height.toFixed(1)} km. A {isStack ? 'seasonal stack' : 'single-date run'} takes at most {cap} km a side.
+            This area is about {span.width.toFixed(1)} x {span.height.toFixed(1)} km. A single-date run takes at most {cap} km a side.
           </Notice>
         )}
         {search.error && <Notice tone="error" icon={CircleAlert}>{search.error.message}</Notice>}
@@ -377,13 +317,12 @@ function NewRunPanel({ api, providers, onStarted }) {
             <h3 className="text-xs font-semibold text-zinc-300">
               {items.length ? `${items.length} Sentinel-2 date${items.length === 1 ? '' : 's'} found` : 'No clear dates found'}
             </h3>
-            <span className="text-[11px] text-zinc-500">{isStack ? 'Pick up to three, one per season.' : 'Pick one.'}</span>
+            <span className="text-[11px] text-zinc-500">Pick one.</span>
           </div>
           {items.length === 0 && <p className="text-xs text-zinc-500">Try a wider date range or a higher cloud limit.</p>}
           <ul className="max-h-72 space-y-1.5 overflow-y-auto pr-1">
             {items.map((item) => {
               const picked = selected.includes(item.product_id);
-              const season = seasonOf(item.sensing_start, seasons);
               return (
                 <li key={item.product_id}>
                   <button
@@ -393,7 +332,7 @@ function NewRunPanel({ api, providers, onStarted }) {
                     className={`flex w-full items-center justify-between gap-3 rounded-lg border px-3 py-2 text-left transition disabled:cursor-not-allowed disabled:opacity-50 ${picked ? 'border-sky-400/50 bg-sky-400/[0.08]' : 'border-white/[0.08] bg-black/10 hover:border-sky-400/30'}`}
                   >
                     <span className="min-w-0">
-                      <span className="block text-xs font-semibold text-zinc-100">{formatDay(item.sensing_start)}{season ? ` · ${readableSeason(season)}` : ''}</span>
+                      <span className="block text-xs font-semibold text-zinc-100">{formatDay(item.sensing_start)}</span>
                       <span className="mt-0.5 block text-[11px] text-zinc-500">
                         {item.platform || 'Sentinel-2'} · tile {item.tile_id || '?'} · {num(item.cloud_cover, 1)}% cloud on the tile
                         {item.covers_aoi === false ? ' · covers only part of your area' : ''}
@@ -419,7 +358,7 @@ function NewRunPanel({ api, providers, onStarted }) {
               {left !== null && <> of your {num(left, 0)} left this month</>}
             </p>
           ) : (
-            <p className="mt-1.5 text-xs text-amber-200">This area cannot be mapped in this mode; see the note above.</p>
+            <p className="mt-1.5 text-xs text-amber-200">This area cannot be mapped; see the note above.</p>
           )}
           <label className="mt-3 block text-[11px] font-semibold text-zinc-400">Name (optional)
             <input value={name} onChange={(e) => setName(e.target.value)} maxLength={120} placeholder="e.g. Visakhapatnam coast, 2026" className="mt-1.5 w-full rounded-lg border border-white/[0.1] bg-[#09090b] px-3 py-2 text-xs text-white outline-none placeholder:text-zinc-600 focus:border-sky-400/60" />
