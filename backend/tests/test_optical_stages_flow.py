@@ -264,11 +264,17 @@ def _model_outputs(valid: np.ndarray, use: list[int]) -> dict[str, Any]:
     }
 
 
-def _write_class_raster(path: Path, classes: np.ndarray, has_data: np.ndarray) -> None:
+CLASS_COLORS = [(250, 0, 0), (240, 150, 255), (0, 100, 0), (180, 180, 180), (0, 100, 200)]
+
+
+def _write_class_raster(path: Path, classes: np.ndarray, has_data: np.ndarray, *, palette: bool = True) -> None:
+    """A class map as the release writes it: 1..5, 0 is no data and fully transparent in the colour table."""
     export = np.where(has_data, classes.astype(np.int16) + 1, 0).astype(np.uint8)
     with rasterio.open(path, "w", driver="GTiff", width=GRID.width, height=GRID.height, count=1, dtype="uint8",
                        crs=f"EPSG:{GRID.epsg}", transform=Affine(*GRID.transform), nodata=0) as dst:
         dst.write(export, 1)
+        if palette:
+            dst.write_colormap(1, {0: (0, 0, 0, 0), **{i + 1: (*rgb, 255) for i, rgb in enumerate(CLASS_COLORS)}})
 
 
 def _fake_bundle(release_code, calls: list[dict[str, Any]], predict_calls: list[dict[str, Any]]) -> SimpleNamespace:
@@ -296,10 +302,13 @@ def _fake_bundle(release_code, calls: list[dict[str, Any]], predict_calls: list[
         G.write_agreement_csv(str(out / "agreement_matrix.csv"), G.agreement_matrix(classes, reference), "dates", {"T1": 0.13})
         G.write_csv(str(out / "lulc_stats.csv"), G.class_stats(classes, reference, np.full(classes.shape, 80.0)))
         _write_class_raster(out / f"{name}_lulc_10m.tif", classes, res["has_data"])
+        _write_class_raster(out / f"{name}_worldcover2021_10m.tif", reference, np.ones_like(res["has_data"]))
         for suffix in PREVIEW_KEYS:
             Image.new("RGB", (8, 8)).save(out / f"{name}_{suffix}")
-        for suffix in ("lulc_10m.qml", "lulc_10m.clr", "lulc_10m.tif.aux.xml", "score_10m.tif",
-                       "worldcover2021_10m.tif", "polygons.gpkg", "model_view_pca.tif", "similarity.tif", "similarity.qml"):
+        # Everything else the release leaves in its working folder; only some of it reaches the user.
+        for suffix in ("lulc_10m.qml", "lulc_10m.clr", "lulc_10m.tif.aux.xml", "score_10m.tif", "score_10m.qml",
+                       "worldcover2021_10m.qml", "worldcover2021_10m.clr", "worldcover2021_10m.tif.aux.xml", "polygons.gpkg",
+                       "model_view_pca.tif", "similarity.tif", "similarity.qml"):
             (out / f"{name}_{suffix}").write_bytes(b"stand-in")
         (out / "VALIDATION_AND_CITATION.txt").write_text("cite", encoding="utf-8")
         (out / "run_summary.json").write_text("{}", encoding="utf-8")
@@ -503,15 +512,24 @@ def test_the_bundle_previews_and_summary_are_stored_under_their_public_names(opt
     for logical_key in PREVIEW_KEYS.values():
         assert artifacts[logical_key]["kind"] == "evidence"
         assert len(artifacts[logical_key]["metadata"]["corners_lonlat"]) == 4
-    aux = artifacts[f"derived:optical:file:{SLUG}_lulc_10m.tif.aux.xml:v1"]
-    assert aux["kind"] == "other" and aux["content_type"] == "application/xml"
+    style = artifacts[f"derived:optical:file:{SLUG}_landcover.qml:v1"]
+    assert style["kind"] == "other" and style["content_type"] == "application/xml"
+    colour_map = artifacts[f"derived:optical:file:{SLUG}_landcover.clr:v1"]
+    assert colour_map["kind"] == "other" and colour_map["content_type"] == "text/plain"
 
     bundle = artifacts[BUNDLE_KEY]
     with zipfile.ZipFile(optical.storage._path(bundle["storage_key"])) as archive:
-        names = set(archive.namelist())
-    assert f"{SLUG}_gis_bundle/agreement_matrix.csv" in names
-    assert f"{SLUG}_gis_bundle/{SLUG}_polygons.gpkg" in names
-    assert len(names) == len(bundle["metadata"]["files"])
+        names = archive.namelist()
+    root = f"{SLUG}_gis_bundle/"
+    # Only the rasters and their style files, not the release's whole working folder.
+    assert set(names) == {root + n for n in (
+        f"{SLUG}_landcover.tif", f"{SLUG}_landcover.qml", f"{SLUG}_landcover.clr",
+        f"{SLUG}_confidence.tif", f"{SLUG}_confidence.qml",
+        f"extras/{SLUG}_worldcover2021.tif", f"extras/{SLUG}_worldcover2021.qml", f"extras/{SLUG}_worldcover2021.clr",
+        f"extras/{SLUG}_class_probabilities.tif",
+    )}
+    assert {Path(n).suffix for n in names} == {".tif", ".qml", ".clr"}
+    assert sorted(bundle["metadata"]["files"]) == sorted(n[len(root):] for n in names)
 
     summary = optical.storage.read_json(artifacts[SUMMARY_KEY]["storage_key"])
     assert summary["timesteps_used"] == [0, 2]
@@ -520,7 +538,8 @@ def test_the_bundle_previews_and_summary_are_stored_under_their_public_names(opt
     assert summary["artifacts"]["bundle_zip"] == bundle["id"]
     assert summary["artifacts"]["true_color"] == artifacts[PREVIEW_KEYS["true_color.png"]]["id"]
     assert summary["artifacts"]["model_view"] == artifacts[PREVIEW_KEYS["model_view_pca.png"]]["id"]
-    assert f"{SLUG}_lulc_10m.tif" in summary["artifacts"]
+    assert f"{SLUG}_landcover.tif" in summary["artifacts"] and f"{SLUG}_lulc_10m.tif" not in summary["artifacts"]
+    assert not any(k.endswith((".xlsx", ".txt", ".gpkg", ".csv")) for k in summary["artifacts"])
 
 
 def test_the_record_and_evidence_row_describe_the_run(optical):
@@ -602,9 +621,9 @@ def test_the_bundle_gains_spectral_indices_and_class_probabilities(optical):
 
     with zipfile.ZipFile(optical.storage._path(artifacts[BUNDLE_KEY]["storage_key"])) as archive:
         names = set(archive.namelist())
-    assert f"{SLUG}_gis_bundle/spectral_indices.csv" in names
-    assert f"{SLUG}_gis_bundle/{SLUG}_class_probabilities_10m.tif" in names
-    probabilities = artifacts[f"derived:optical:file:{SLUG}_class_probabilities_10m.tif:v1"]
+    assert f"{SLUG}_gis_bundle/extras/{SLUG}_class_probabilities.tif" in names
+    assert not any(n.endswith(".csv") for n in names)  # the spectral rows live in the scene record, not the zip
+    probabilities = artifacts[f"derived:optical:file:{SLUG}_class_probabilities.tif:v1"]
     with rasterio.open(optical.storage._path(probabilities["storage_key"])) as ds:
         assert (ds.count, ds.dtypes[0], ds.nodata) == (5, "uint8", 255)
         assert ds.descriptions[0] == "P(Built-up) %"
@@ -616,6 +635,56 @@ def test_the_bundle_gains_spectral_indices_and_class_probabilities(optical):
     assert len(summary["spectral_indices"]) == 3 * len(CLASS_NAMES)
     built_up_rows = [r for r in summary["spectral_indices"] if r["class_name"] == "Built-up"]
     assert [r["used_by_model"] for r in built_up_rows] == [True, False, True]
+
+
+# --------------------------------------------------------------------------
+# Map previews
+# --------------------------------------------------------------------------
+
+
+def test_class_previews_are_painted_from_the_tiff_palette_with_transparent_no_data(tmp_path):
+    from app.workers.optical_stages import _class_preview
+
+    classes = np.zeros((GRID.height, GRID.width), np.uint8)
+    classes[:, GRID.width // 2 :] = 2
+    has_data = np.ones_like(classes, bool)
+    has_data[:20, :20] = False
+    tif, png = tmp_path / "map.tif", tmp_path / "map.png"
+    _write_class_raster(tif, classes, has_data)
+    Image.new("RGB", (8, 8), (0, 0, 0)).save(png)  # the release's opaque preview
+
+    _class_preview(tif, png)
+
+    with Image.open(png) as image:
+        assert image.mode == "RGBA" and image.size == (GRID.width, GRID.height)
+        pixels = np.asarray(image)
+    assert pixels[5, 5, 3] == 0  # no data is a hole in the preview, not black
+    assert tuple(pixels[50, 10]) == (*CLASS_COLORS[0], 255)  # built-up, as the GeoTIFF's own table says
+    assert tuple(pixels[50, GRID.width - 10]) == (*CLASS_COLORS[2], 255)  # forest
+
+
+def test_a_class_map_without_a_palette_keeps_the_releases_preview(tmp_path):
+    from app.workers.optical_stages import _class_preview
+
+    tif, png = tmp_path / "map.tif", tmp_path / "map.png"
+    _write_class_raster(tif, np.zeros((GRID.height, GRID.width), np.uint8), np.ones((GRID.height, GRID.width), bool), palette=False)
+    Image.new("RGB", (8, 8), (9, 9, 9)).save(png)
+
+    _class_preview(tif, png)  # cosmetic, so it never fails the run
+
+    with Image.open(png) as image:
+        assert image.size == (8, 8)
+    _class_preview(tmp_path / "missing.tif", png)  # and neither does a raster that is not there
+
+
+def test_the_stored_class_previews_have_a_transparent_background_slot(optical):
+    _run_all(optical)
+    artifact = optical.repository.artifacts[PREVIEW_KEYS["lulc.png"]]
+    with Image.open(optical.storage._path(artifact["storage_key"])) as image:
+        assert image.mode == "RGBA" and image.size == (GRID.width, GRID.height)
+    reference = optical.repository.artifacts[PREVIEW_KEYS["worldcover2021.png"]]
+    with Image.open(optical.storage._path(reference["storage_key"])) as image:
+        assert image.mode == "RGBA"
 
 
 # --------------------------------------------------------------------------

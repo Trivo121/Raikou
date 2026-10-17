@@ -247,6 +247,31 @@ def _artifact_name(record: dict[str, Any], suffix: str) -> str | None:
     return next((name for name in artifacts if str(name).endswith(suffix)), None)
 
 
+def _bundle_names(record: dict[str, Any]) -> dict[str, str]:
+    """What this run's GIS bundle holds, and where its tables are.
+
+    Runs made before the bundle was simplified have a flat folder of rasters,
+    CSV tables and a GeoPackage. Newer runs ship only the rasters and their
+    style files, and the tables are on the page. The record names the files it
+    stored, so the answer says what is actually in the user's download.
+    """
+    if _artifact_name(record, "_landcover.tif"):
+        return {
+            "layout": "current",
+            "map": _artifact_name(record, "_landcover.tif") or "the *_landcover.tif map",
+            "statistics": "the class table on this page",
+            "agreement": "the agreement table (ask me for it)",
+            "spectral": "the spectral table on this page",
+        }
+    return {
+        "layout": "legacy",
+        "map": _artifact_name(record, "_lulc_10m.tif") or "the *_lulc_10m.tif map",
+        "statistics": "lulc_stats.csv",
+        "agreement": "agreement_matrix.csv",
+        "spectral": "spectral_indices.csv",
+    }
+
+
 def _limitations(record: dict[str, Any], *needles: str) -> list[str]:
     items = [str(x) for x in record.get("limitations") or [] if isinstance(x, str)]
     if not needles:
@@ -318,7 +343,7 @@ def _area_answer(record: dict[str, Any], query: str) -> str:
         lines.append(f"The largest class is {lulc['dominant_class']}.")
     lines.append(
         "Scores are calibrated agreement with WorldCover-2021-derived labels, not field-verified accuracy; "
-        "the GIS bundle has the same figures in lulc_stats.csv."
+        f"the GIS bundle has the same figures in {_bundle_names(record)['statistics']}."
     )
     return "\n".join(lines)
 
@@ -376,11 +401,17 @@ def _trust_answer(record: dict[str, Any]) -> str:
         lines.append("Mean score in this run: " + ", ".join(f"{c['class_name']} {_pct(c['mean_score_pct'], 0)}" for c in scored) + ".")
     caveats = _limitations(record, "single date", "outside india", "no clear observation", "floods seasonally", "two dates")
     lines += [f"- {item}" for item in caveats]
-    lulc_tif = _artifact_name(record, "_lulc_10m.tif") or "the *_lulc_10m.tif map"
-    lines.append(
-        f"To audit it in QGIS: open the GIS bundle, load {lulc_tif} (its .qml styles it), the WorldCover 2021 raster and the "
-        "score raster over the true-colour image, look first at low-score areas, and compare classes with agreement_matrix.csv."
-    )
+    bundle = _bundle_names(record)
+    if bundle["layout"] == "current":
+        lines.append(
+            f"To audit it in QGIS: open the GIS bundle, load {bundle['map']} (its .qml styles it) and the confidence map over a "
+            "satellite basemap, look first at low-confidence areas, and compare with the WorldCover 2021 raster in extras/."
+        )
+    else:
+        lines.append(
+            f"To audit it in QGIS: open the GIS bundle, load {bundle['map']} (its .qml styles it), the WorldCover 2021 raster and the "
+            f"score raster over the true-colour image, look first at low-score areas, and compare classes with {bundle['agreement']}."
+        )
     return "\n".join(lines)
 
 
@@ -404,7 +435,9 @@ def _spectral_answer(record: dict[str, Any]) -> str:
     definitions = spectral.get("indices") if isinstance(spectral.get("indices"), dict) else {}
     if definitions:
         lines.append("; ".join(f"{k.upper()} = {v}" for k, v in definitions.items()) + ".")
-    lines.append("They describe the image on that date, not field measurements; spectral_indices.csv in the GIS bundle has every value.")
+    lines.append(
+        f"They describe the image on that date, not field measurements; {_bundle_names(record)['spectral']} in the GIS bundle has every value."
+    )
     return "\n".join(lines)
 
 
@@ -474,12 +507,20 @@ def _download_answer(record: dict[str, Any]) -> str:
     scene = record.get("scene") if isinstance(record.get("scene"), dict) else {}
     grid = scene.get("grid") if isinstance(scene.get("grid"), dict) else {}
     files = sorted(name for name in artifacts if "." in str(name))
-    lines = [
-        "Download the GIS bundle (one zip) from this run's results. It holds the land-cover map (classes 1-5 with a colour table and "
-        "QGIS .qml / .clr styles), the calibrated score and per-class probability rasters, the WorldCover 2021 reference on the same "
-        "grid, polygons as a GeoPackage, lulc_stats.csv, agreement_matrix.csv, spectral_indices.csv, the model-view and similarity "
-        "rasters, and VALIDATION_AND_CITATION.txt with how to cite it."
-    ]
+    if _bundle_names(record)["layout"] == "current":
+        lines = [
+            "Download the GIS bundle (one zip) from this run's results. It holds the land-cover map (classes 1-5, with a colour table, "
+            "an ArcGIS .clr and a QGIS .qml style), the per-pixel confidence map, and in extras/ the WorldCover 2021 reference on the "
+            "same grid and the per-class probabilities. Class areas, agreement with WorldCover 2021 and spectral indices are on this "
+            "page and in this chat, not in the zip."
+        ]
+    else:
+        lines = [
+            "Download the GIS bundle (one zip) from this run's results. It holds the land-cover map (classes 1-5 with a colour table and "
+            "QGIS .qml / .clr styles), the calibrated score and per-class probability rasters, the WorldCover 2021 reference on the same "
+            "grid, polygons as a GeoPackage, lulc_stats.csv, agreement_matrix.csv, spectral_indices.csv, the model-view and similarity "
+            "rasters, and VALIDATION_AND_CITATION.txt with how to cite it."
+        ]
     if grid.get("epsg"):
         lines.append(f"Rasters are Cloud-Optimised GeoTIFFs on EPSG:{grid['epsg']}; drag them into QGIS or ArcGIS.")
     if files:

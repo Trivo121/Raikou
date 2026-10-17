@@ -181,6 +181,45 @@ def test_imagery_method_download_and_summary_answers():
     assert chat.compose_optical_answer("summary", record).startswith("Sentinel-2 land cover (single date, 2026-04-13)")
 
 
+def _simplified_bundle_record() -> dict:
+    """A run made after the bundle was simplified: rasters and their styles only, no tables in the zip."""
+    summary = _summary()
+    summary["artifacts"].pop("land_cover_2026_04_13_lulc_10m.tif")
+    summary["artifacts"].update({
+        "land_cover_2026_04_13_landcover.tif": "99999999-9999-4999-8999-999999999999",
+        "land_cover_2026_04_13_landcover.qml": "88888888-8888-4888-8888-888888888888",
+        "land_cover_2026_04_13_landcover.clr": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+    })
+    return build_optical_record(
+        scene={"id": SCENE_ID, "name": "Land cover 2026-04-13 (17.720, 83.240)"},
+        acquisition={"processing_units": 17.0636},
+        summary=summary,
+    )
+
+
+def test_answers_name_the_files_in_the_users_download_for_either_bundle_layout():
+    simple, old = _simplified_bundle_record(), _record()
+
+    download = chat.compose_optical_answer("download", simple)
+    assert ".clr" in download and ".qml" in download and "extras/" in download
+    assert "land_cover_2026_04_13_landcover.tif" in download
+    assert "not in the zip" in download  # the tables moved to the page
+    for gone in ("README", "workbook", "lulc_stats.csv", "GeoPackage", "similarity"):
+        assert gone not in download
+
+    trust = chat.compose_optical_answer("trust", simple)
+    assert "land_cover_2026_04_13_landcover.tif" in trust and "extras/" in trust
+    assert "agreement_matrix.csv" not in trust and "_lulc_10m" not in trust
+    assert "class table on this page" in chat.compose_optical_answer("area", simple)
+    assert "spectral table on this page" in chat.compose_optical_answer("spectral", simple)
+
+    # A run made before the change still has the flat folder, and is described as it is.
+    assert "lulc_stats.csv" in chat.compose_optical_answer("area", old)
+    assert "agreement_matrix.csv" in chat.compose_optical_answer("trust", old)
+    assert "spectral_indices.csv" in chat.compose_optical_answer("spectral", old)
+    assert "VALIDATION_AND_CITATION.txt" in chat.compose_optical_answer("download", old)
+
+
 def test_refusals_say_what_can_be_answered_instead():
     for intent in ("refuse_security", "refuse_objects", "refuse_ownership"):
         answer = chat.compose_optical_answer(intent, _record())

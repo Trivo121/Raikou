@@ -32,6 +32,7 @@ import zipfile
 
 from app.core.config import settings
 from app.services.acquisitions import copernicus
+from app.services.optical import bundle as gis_bundle
 from app.services.optical.artifacts import (
     BUNDLE_KEY,
     EMBEDDINGS_KEY,
@@ -78,11 +79,7 @@ PROGRESS = {
 CONTENT_TYPES = {
     ".tif": "image/tiff",
     ".png": "image/png",
-    ".gpkg": "application/geopackage+sqlite3",
-    ".csv": "text/csv",
-    ".txt": "text/plain",
     ".qml": "application/xml",
-    ".xml": "application/xml",
     ".clr": "text/plain",
     ".json": "application/json",
     ".zip": "application/zip",
@@ -194,6 +191,30 @@ def _read_class_map(path: Path) -> Any:
 
     with rasterio.open(path) as ds:
         return ds.read(1).astype(np.uint8)
+
+
+def _class_preview(tif: Path, png: Path) -> None:
+    """Repaint a class map's preview from the GeoTIFF's own colour table.
+
+    The release paints no-data black, which reads as a hole in the map once the
+    preview sits over the basemap. The GeoTIFF's table already makes 0 fully
+    transparent and carries the exact colours the bundle shows in QGIS. A
+    preview is cosmetic, so a raster without a table keeps the release's PNG.
+    """
+    import numpy as np
+    import rasterio
+    from PIL import Image
+
+    try:
+        with rasterio.open(tif) as ds:
+            band = ds.read(1)
+            table = ds.colormap(1)
+        lookup = np.zeros((256, 4), np.uint8)
+        for value, rgba in table.items():
+            lookup[int(value)] = rgba
+        Image.fromarray(lookup[band]).save(png, optimize=True)
+    except Exception:  # noqa: BLE001 - cosmetic; the release's preview stays
+        logger.warning("Could not repaint %s with transparent no-data", png.name, exc_info=True)
 
 
 class OpticalStagesMixin:
@@ -565,34 +586,40 @@ class OpticalStagesMixin:
         )
         del captured
 
+        # The map previews the page draws over the basemap: class maps get a transparent no-data.
+        _class_preview(out_dir / f"{name}_lulc_10m.tif", out_dir / f"{name}_lulc.png")
+        _class_preview(out_dir / f"{name}_worldcover2021_10m.tif", out_dir / f"{name}_worldcover2021.png")
+
+        # What the user downloads is the rasters and their style files, not the release's whole working folder.
+        bundle_dir = workdir / "gis_bundle"
+        files = gis_bundle.assemble(out_dir, bundle_dir, name=name)
         zip_path = workdir / f"{name}_gis_bundle.zip"
         with zipfile.ZipFile(zip_path, "w", zipfile.ZIP_DEFLATED) as zf:
-            for f in sorted(out_dir.iterdir()):
-                if f.is_file():
-                    zf.write(f, arcname=f"{name}_gis_bundle/{f.name}")
+            for relative in files:
+                zf.write(bundle_dir / relative, arcname=f"{name}_gis_bundle/{relative}")
 
         artifacts: dict[str, str] = {}
-        for f in sorted(out_dir.iterdir()):
+        for suffix, logical_key in PREVIEW_KEYS.items():
+            f = out_dir / f"{name}_{suffix}"
             if not f.is_file():
                 continue
-            ext = "".join(f.suffixes[-2:]) if f.name.endswith(".aux.xml") else f.suffix
-            content_type = CONTENT_TYPES.get(".xml" if ext == ".aux.xml" else ext.lower(), "application/octet-stream")
-            preview = next((k for suffix, k in PREVIEW_KEYS.items() if f.name.endswith(f"_{suffix}")), None)
-            if preview:
-                art = self._persist_file(
-                    task, kind="evidence", logical_key=preview, path=f, content_type=content_type,
-                    metadata={"optical_preview": True, "corners_lonlat": corners, "filename": f.name},
-                )
-            else:
-                preview = file_key(f.name)
-                art = self._persist_file(
-                    task, kind="other", logical_key=preview, path=f, content_type=content_type,
-                    metadata={"optical_bundle_file": True, "filename": f.name},
-                )
-            artifacts[public_name(preview)] = str(art["id"])
+            art = self._persist_file(
+                task, kind="evidence", logical_key=logical_key, path=f, content_type=CONTENT_TYPES[f.suffix.lower()],
+                metadata={"optical_preview": True, "corners_lonlat": corners, "filename": f.name},
+            )
+            artifacts[public_name(logical_key)] = str(art["id"])
+        for relative in files:
+            f = bundle_dir / relative
+            logical_key = file_key(f.name)
+            art = self._persist_file(
+                task, kind="other", logical_key=logical_key, path=f,
+                content_type=CONTENT_TYPES.get(f.suffix.lower(), "application/octet-stream"),
+                metadata={"optical_bundle_file": True, "filename": f.name},
+            )
+            artifacts[public_name(logical_key)] = str(art["id"])
         bundle_art = self._persist_file(
             task, kind="other", logical_key=BUNDLE_KEY, path=zip_path, content_type="application/zip",
-            metadata={"optical_bundle": True, "filename": zip_path.name, "files": sorted(p.name for p in out_dir.iterdir() if p.is_file())},
+            metadata={"optical_bundle": True, "filename": zip_path.name, "files": files},
         )
         artifacts[public_name(BUNDLE_KEY)] = str(bundle_art["id"])
 
@@ -647,14 +674,15 @@ class OpticalStagesMixin:
     ) -> dict[str, Any]:
         """Everything Phase 2 adds beside the release's bundle, from the captured model outputs.
 
-        Into the bundle: spectral_indices.csv and a class-probability COG.
+        Into the bundle: a class-probability COG. The spectral index rows go
+        into the scene record, and the score preview is drawn for the map only.
         Kept as internal artifacts: reduced token embeddings (similarity
         heatmaps) and 640 m window vectors (Qdrant).
         """
         import numpy as np
 
         from app.services.optical import embeddings as emb
-        from app.services.optical.indices import class_index_medians, write_csv
+        from app.services.optical.indices import class_index_medians
 
         class_names = [str(c.get("name")) for c in card.get("classes") or []]
         has_data = np.asarray(captured["has_data"], bool)
@@ -663,7 +691,6 @@ class OpticalStagesMixin:
         class_map = _read_class_map(out_dir / f"{name}_lulc_10m.tif")
 
         spectral = class_index_medians(dn, valid, class_map, class_names, dates, use)
-        write_csv(out_dir / "spectral_indices.csv", spectral)
         _write_probabilities(
             out_dir / f"{name}_class_probabilities_10m.tif", captured["logits"], has_data, temperature, grid, class_names
         )
