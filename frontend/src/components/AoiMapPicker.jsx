@@ -1,9 +1,15 @@
 import { useEffect, useRef, useState } from 'react';
 // maplibre-gl v6 ships named ESM exports only; there is no default export.
 // `Map` is aliased because it otherwise shadows the global Map constructor.
-import { AttributionControl, LngLatBounds, Map as MapLibreMap, NavigationControl } from 'maplibre-gl';
+import { AttributionControl, LngLatBounds, Map as MapLibreMap, NavigationControl, setWorkerUrl } from 'maplibre-gl';
 import 'maplibre-gl/dist/maplibre-gl.css';
 import { Layers, Square, Trash2 } from 'lucide-react';
+
+// maplibre looks for its worker next to its own module file, which does not exist once
+// it is bundled: in production the drawn box and every other GeoJSON layer then never
+// render. vite.config.js ships the worker under /maplibre/. The dev server serves
+// maplibre from node_modules, where the default already works.
+if (import.meta.env.PROD) setWorkerUrl(`${import.meta.env.BASE_URL}maplibre/maplibre-gl-worker.mjs`);
 
 // Sentinel-2 cloudless is the default because this tool picks Sentinel-1
 // frames: the user is choosing ground, so they should be looking at ground,
