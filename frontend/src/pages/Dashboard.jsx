@@ -494,7 +494,7 @@ function EmptyProjects({ hasSearch, onCreate }) {
         <p className="mt-1 text-[12px] text-zinc-500">
           {hasSearch
             ? 'Try a different search term.'
-            : 'Create a project to start organising SAR scenes.'}
+            : 'Create a project to start working with SAR or optical imagery.'}
         </p>
       </div>
       {!hasSearch && (

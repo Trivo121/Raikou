@@ -164,8 +164,8 @@ export default function Login() {
               </h1>
               <p className="text-sm leading-relaxed" style={{ color: T.textMuted }}>
                 {isSignUp
-                  ? 'Join the private beta to ingest and query cross-modal satellite indices.'
-                  : 'Log in to your operator dashboard to query SAR indices.'}
+                  ? 'Join the private beta to work with SAR and optical satellite imagery.'
+                  : 'Log in to your operator dashboard to open your SAR and optical projects.'}
               </p>
             </div>
 

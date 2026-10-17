@@ -42,26 +42,26 @@ const T = {
    CONTENT DATA
 ───────────────────────────────────────────── */
 const STATS = [
-  { val: '768-d', label: 'SARCLIP embedding space' },
-  { val: 'SAR', label: 'Scene-first workflow' },
-  { val: 'V1', label: 'Evidence-grounded retrieval' },
+  { val: '2', label: 'Imagery types: SAR and optical' },
+  { val: '768-d', label: 'SARCLIP embeddings for radar search' },
+  { val: '10 m', label: 'Sentinel-2 land-cover maps' },
 ];
 
 const FEATURES = [
   {
-    eyebrow: 'Sensing',
-    title: 'All-weather, day-and-night',
-    body: 'SAR microwave backscatter penetrates cloud cover, rain, and complete darkness. When optical sensors go blind, the system keeps working.',
+    eyebrow: 'Radar',
+    title: 'All-weather SAR search',
+    body: 'Sentinel-1 backscatter sees through cloud, rain, and darkness. Search indexed SAR patches in plain language; each result stays linked to its scene and patch evidence.',
   },
   {
-    eyebrow: 'Retrieval',
-    title: 'Cross-modal vector search',
-    body: 'Query indexed SAR patches with text. Each result stays linked to its source scene and patch evidence.',
+    eyebrow: 'Optical',
+    title: 'Land cover at 10 m',
+    body: 'Draw an area in India, pick a clear Sentinel-2 date, and a model maps it into five classes, checked against ESA WorldCover 2021. Download the maps for QGIS or ArcGIS.',
   },
   {
-    eyebrow: 'Performance',
-    title: 'Evidence-first search',
-    body: 'Qdrant returns semantically related SAR patches while preserving the project, scene, artifact, and model metadata required for review.',
+    eyebrow: 'Evidence',
+    title: 'Answers that show their source',
+    body: 'Each project keeps its scenes, artifacts, and model details together. Chat answers are composed from that record, and say so when it cannot answer.',
   },
 ];
 
@@ -75,18 +75,18 @@ const USE_CASES = [
   },
   {
     tag: 'Use case B',
-    modality: 'SAR → evidence',
-    title: 'Scene-grounded review',
-    prompt: '"bright linear features near shoreline"',
-    body: 'Search the scenes in a project, then review the matching patch bounds, source artifact, and model version alongside the result.',
+    modality: 'Optical → land cover',
+    title: 'Land-cover mapping',
+    prompt: '"how much forest is there, and how far can I trust it?"',
+    body: 'Map an area at 10 m, compare it with ESA WorldCover 2021, then ask how much of each class there is. Answers come from the run\'s own record, and the maps download for your own GIS work.',
   },
 ];
 
 const PIPELINE = [
-  { step: 'Ingest', desc: 'Upload a supported SAR scene and record its project ownership and metadata.' },
-  { step: 'Process', desc: 'Build the overview, patch tiles, and scene evidence artifacts.' },
-  { step: 'Encode', desc: 'SARCLIP embeds each patch into a 768-dimensional vector with model metadata.' },
-  { step: 'Retrieve', desc: 'Text search returns project-scoped patch evidence for review.' },
+  { step: 'Ingest', desc: 'Upload a SAR scene or fetch one from Copernicus. Optical runs fetch the Sentinel-2 date you pick for the area you draw.' },
+  { step: 'Process', desc: 'Build overviews, patch tiles, and evidence artifacts. Optical runs also produce the land-cover map and a confidence map.' },
+  { step: 'Analyse', desc: 'SARCLIP embeds each SAR patch as a 768-dimensional vector. An OlmoEarth model fine-tuned for India classifies optical scenes.' },
+  { step: 'Retrieve', desc: 'Search SAR patches by text, find similar areas on an optical map, and ask questions grounded in the project\'s record.' },
 ];
 
 /* ─────────────────────────────────────────────
@@ -252,7 +252,7 @@ export default function Landing() {
                 className="block w-1.5 h-1.5 rounded-full"
                 style={{ backgroundColor: T.accent, animation: 'blink 2.2s ease-in-out infinite' }}
               />
-              Cross-modal SAR intelligence · Private beta
+              Satellite intelligence · SAR and optical · Private beta
             </div>
 
             {/* H1 — 62–72 px, weight 500, matching GT Walsheim spec */}
@@ -265,9 +265,9 @@ export default function Landing() {
                 letterSpacing: '-0.026em',
               }}
             >
-              See through every cloud.
+              Read every scene.
               <br />
-              <span style={{ color: T.accent }}>Find every target.</span>
+              <span style={{ color: T.accent }}>Radar or optical.</span>
             </h1>
 
             {/* Sub-heading */}
@@ -275,9 +275,9 @@ export default function Landing() {
               className="mx-auto mb-11 leading-[1.78]"
               style={{ fontSize: '16px', color: T.textMuted, maxWidth: '560px' }}
             >
-              A multimodal retrieval system that maps SAR radar backscatter and optical
-              imagery into a shared latent space — enabling project-scoped,
-              evidence-linked satellite search through storms, darkness, and denied conditions.
+              Raikou works with two kinds of satellite imagery. Search Sentinel-1 radar scenes
+              in plain language, or map Sentinel-2 optical scenes into land cover at 10 m.
+              Every result stays linked to its source scene and evidence.
             </p>
 
             {/* CTA buttons */}
@@ -326,7 +326,7 @@ export default function Landing() {
         <section className="max-w-[1100px] mx-auto px-10 py-24">
           <p style={eyebrow}>Capabilities</p>
           <h2 style={{ ...sectionHeading, marginBottom: '52px' }}>
-            Intelligence that never goes dark
+            One workspace for radar and optical imagery
           </h2>
 
           <div className="grid grid-cols-1 md:grid-cols-3 gap-5">
@@ -423,7 +423,7 @@ export default function Landing() {
           <div className="max-w-[1100px] mx-auto">
             <p style={eyebrow}>Ingestion Pipeline</p>
             <h2 style={{ ...sectionHeading, marginBottom: '52px' }}>
-              From raw SAR to grounded answer
+              From raw imagery to grounded answer
             </h2>
 
             {/* Grid — joined cells with shared borders */}
@@ -479,13 +479,13 @@ export default function Landing() {
               className="font-medium text-white mb-4"
               style={{ ...headingFont, fontSize: 'clamp(24px, 4vw, 36px)', letterSpacing: '-0.022em' }}
             >
-              Ready to query beyond the clouds?
+              Ready to explore your imagery?
             </h2>
             <p
               className="mx-auto mb-10"
               style={{ fontSize: '14px', color: T.textMuted, maxWidth: '460px', lineHeight: 1.78 }}
             >
-              Sign in to explore all-weather, project-scoped satellite retrieval.
+              Sign in to start a SAR or optical project.
             </p>
             <button
               onClick={goLogin}
@@ -518,7 +518,7 @@ export default function Landing() {
           </div>
 
           <span style={{ fontSize: '12px', color: T.textGhost }}>
-            Cross-modal satellite intelligence · All-weather retrieval
+            Satellite intelligence · SAR and optical imagery
           </span>
 
           <div className="flex gap-6" style={{ fontSize: '12px', color: 'rgba(255,255,255,0.3)' }}>
