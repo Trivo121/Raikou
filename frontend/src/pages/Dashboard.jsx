@@ -30,15 +30,42 @@ function projectName(project) {
   return project.name || project.title || 'Untitled project';
 }
 
-// The optical page creates and owns one project per user, marked in its
-// description; it opens on /optical rather than the SAR workspace.
+// An optical project is marked in its description (the backend finds the optical
+// workspace the same way). It opens the optical page scoped to itself rather than
+// the SAR workspace.
+const OPTICAL_MARKER = 'raikou:optical-workspace';
+const OPTICAL_DESCRIPTION = `Sentinel-2 land-cover runs. (${OPTICAL_MARKER})`;
+
 function isOpticalProject(project) {
-  return String(project?.description || '').includes('raikou:optical-workspace');
+  return String(project?.description || '').includes(OPTICAL_MARKER);
 }
+
+function projectPath(project) {
+  return isOpticalProject(project) ? `/optical?project=${project.id}` : `/projects/${project.id}`;
+}
+
+// What a new project is for. Chosen after naming it, with no default.
+const IMAGERY_KINDS = [
+  {
+    id: 'sar',
+    icon: Radar,
+    iconClass: 'text-[#53b1ff]',
+    title: 'SAR imagery',
+    detail: 'Sentinel-1 radar scenes. Upload or fetch scenes, then ask what is in them.',
+  },
+  {
+    id: 'optical',
+    icon: Trees,
+    iconClass: 'text-emerald-400/80',
+    title: 'Optical imagery',
+    detail: 'Sentinel-2 land cover. Draw an area in India and map it at 10 m in five classes.',
+  },
+];
 
 /* ─── Project Card ─────────────────────────────────────────────────────────── */
 
 function ProjectCard({ project, onClick }) {
+  const optical = isOpticalProject(project);
   return (
     <button type="button" onClick={onClick} className="group flex flex-col text-left w-full">
       {/* Thumbnail */}
@@ -55,10 +82,16 @@ function ProjectCard({ project, onClick }) {
             <span className="flex-1 bg-zinc-700/80 group-hover:bg-zinc-600/80 transition-colors" />
           </div>
         </div>
+        {/* Imagery type badge */}
+        <div className="absolute top-2.5 left-2.5">
+          <span className={`text-[9px] font-bold uppercase tracking-widest bg-[#09090b]/80 border border-white/[0.07] rounded-md px-1.5 py-0.5 ${optical ? 'text-emerald-400/80' : 'text-[#53b1ff]'}`}>
+            {optical ? 'Optical' : 'SAR'}
+          </span>
+        </div>
         {/* Scene count badge */}
         <div className="absolute top-2.5 right-2.5">
           <span className="text-[9px] font-bold uppercase tracking-widest text-zinc-500 bg-[#09090b]/80 border border-white/[0.07] rounded-md px-1.5 py-0.5">
-            {Number(project.scene_count || 0)} scenes
+            {Number(project.scene_count || 0)} {optical ? 'runs' : 'scenes'}
           </span>
         </div>
       </div>
@@ -93,6 +126,7 @@ export default function Dashboard() {
   const [searchTerm, setSearchTerm] = useState('');
   const [isCreating, setIsCreating] = useState(false);
   const [newProjectName, setNewProjectName] = useState('');
+  const [imageryKind, setImageryKind] = useState(null);
   const [copySuccess, setCopySuccess] = useState(false);
 
   const projectsQuery = useQuery({
@@ -102,12 +136,13 @@ export default function Dashboard() {
   });
 
   const createProject = useMutation({
-    mutationFn: (name) => api.projects.create({ name }),
-    onSuccess: (project) => {
+    mutationFn: ({ name, kind }) => api.projects.create(kind === 'optical' ? { name, description: OPTICAL_DESCRIPTION } : { name }),
+    onSuccess: (project, { kind }) => {
       queryClient.invalidateQueries({ queryKey: ['projects', user?.id] });
       setNewProjectName('');
+      setImageryKind(null);
       setIsCreating(false);
-      if (project?.id) navigate(`/projects/${project.id}`);
+      if (project?.id) navigate(kind === 'optical' ? `/optical?project=${project.id}` : `/projects/${project.id}`);
     },
   });
 
@@ -126,8 +161,14 @@ export default function Dashboard() {
   function submitProject(event) {
     event.preventDefault();
     const name = newProjectName.trim();
-    if (!name || createProject.isPending) return;
-    createProject.mutate(name);
+    if (!name || !imageryKind || createProject.isPending) return;
+    createProject.mutate({ name, kind: imageryKind });
+  }
+
+  // Closing the form forgets the choice, so reopening it never starts pre-selected.
+  function closeCreate() {
+    setIsCreating(false);
+    setImageryKind(null);
   }
 
   async function copyWorkspaceLink() {
@@ -296,19 +337,19 @@ export default function Dashboard() {
               <div className="mb-4 flex items-start justify-between gap-4">
                 <div>
                   <h2 className="text-[13px] font-semibold text-white">Create new project</h2>
-                  <p className="mt-0.5 text-[12px] text-zinc-500">Give your project a descriptive name to get started.</p>
+                  <p className="mt-0.5 text-[12px] text-zinc-500">Name your project, then choose the kind of imagery it will use.</p>
                 </div>
                 <button
                   type="button"
-                  onClick={() => setIsCreating(false)}
+                  onClick={closeCreate}
                   className="shrink-0 rounded-lg p-1 text-zinc-600 transition-all hover:bg-white/[0.05] hover:text-zinc-300"
                 >
                   <X size={15} />
                 </button>
               </div>
 
-              <form onSubmit={submitProject} className="flex flex-col gap-3 sm:flex-row">
-                <div className="min-w-0 flex-1">
+              <form onSubmit={submitProject} className="flex flex-col gap-5">
+                <div className="min-w-0">
                   <label htmlFor="project-name" className="sr-only">Project name</label>
                   <input
                     autoFocus
@@ -319,25 +360,61 @@ export default function Dashboard() {
                     maxLength={120}
                     className="w-full rounded-lg border border-white/[0.1] bg-[#09090b] px-3 py-2.5 text-[13px] text-white outline-none placeholder:text-zinc-600 focus:border-[#0088ff]/50 focus:ring-2 focus:ring-[#0088ff]/10 transition-all"
                   />
-                  {createProject.error && (
-                    <p className="mt-2 flex items-center gap-1.5 text-[12px] text-red-400">
-                      <span className="h-1 w-1 shrink-0 rounded-full bg-red-400" />
-                      {createProject.error.message}
-                    </p>
-                  )}
                 </div>
 
-                <div className="flex shrink-0 items-center gap-2">
+                <fieldset>
+                  <legend className="mb-2 text-[11px] font-semibold text-zinc-400">What kind of imagery will this project use?</legend>
+                  <div role="radiogroup" aria-label="Imagery type" className="grid gap-3 sm:grid-cols-2">
+                    {IMAGERY_KINDS.map(({ id, icon: Icon, iconClass, title, detail }) => {
+                      const selected = imageryKind === id;
+                      return (
+                        <button
+                          key={id}
+                          type="button"
+                          role="radio"
+                          aria-checked={selected}
+                          onClick={() => setImageryKind(id)}
+                          className={`flex items-start gap-3 rounded-lg border px-3.5 py-3 text-left transition-all ${selected
+                              ? 'border-[#0088ff]/60 bg-[#0088ff]/[0.08]'
+                              : 'border-white/[0.08] bg-black/10 hover:border-white/[0.18]'
+                            }`}
+                        >
+                          <Icon size={18} className={`mt-0.5 shrink-0 ${iconClass}`} />
+                          <span className="min-w-0 flex-1">
+                            <span className="block text-[13px] font-semibold text-zinc-100">{title}</span>
+                            <span className="mt-0.5 block text-[11px] leading-4 text-zinc-500">{detail}</span>
+                          </span>
+                          <span
+                            aria-hidden="true"
+                            className={`mt-0.5 grid h-4 w-4 shrink-0 place-items-center rounded-full border ${selected ? 'border-[#0088ff]' : 'border-zinc-600'}`}
+                          >
+                            {selected && <span className="h-2 w-2 rounded-full bg-[#0088ff]" />}
+                          </span>
+                        </button>
+                      );
+                    })}
+                  </div>
+                </fieldset>
+
+                {createProject.error && (
+                  <p className="flex items-center gap-1.5 text-[12px] text-red-400">
+                    <span className="h-1 w-1 shrink-0 rounded-full bg-red-400" />
+                    {createProject.error.message}
+                  </p>
+                )}
+
+                <div className="flex flex-wrap items-center justify-end gap-2">
+                  {!imageryKind && <p className="mr-auto text-[11px] text-zinc-500">Choose SAR or optical imagery to continue.</p>}
                   <button
                     type="button"
-                    onClick={() => setIsCreating(false)}
+                    onClick={closeCreate}
                     className="rounded-lg px-3 py-2.5 text-[12px] text-zinc-500 transition-all hover:bg-white/[0.05] hover:text-zinc-300"
                   >
                     Cancel
                   </button>
                   <button
                     type="submit"
-                    disabled={!newProjectName.trim() || createProject.isPending}
+                    disabled={!newProjectName.trim() || !imageryKind || createProject.isPending}
                     className="rounded-lg bg-[#0088ff] px-4 py-2.5 text-[12px] font-semibold text-white transition-all hover:bg-[#0077ee] disabled:cursor-not-allowed disabled:opacity-40"
                   >
                     {createProject.isPending ? 'Creating…' : 'Create Project'}
@@ -371,7 +448,7 @@ export default function Dashboard() {
                     <ProjectCard
                       key={project.id}
                       project={project}
-                      onClick={() => navigate(isOpticalProject(project) ? '/optical' : `/projects/${project.id}`)}
+                      onClick={() => navigate(projectPath(project))}
                     />
                   ))}
                 </div>

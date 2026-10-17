@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
-import { Link, useNavigate, useParams } from 'react-router-dom';
+import { Link, useNavigate, useParams, useSearchParams } from 'react-router-dom';
 import {
   AlertTriangle,
   ArrowLeft,
@@ -203,7 +203,7 @@ function Legend({ layer, classes }) {
 
 /* ─── New run ──────────────────────────────────────────────────────────────── */
 
-function NewRunPanel({ api, providers, onStarted }) {
+function NewRunPanel({ api, providers, projectId, onStarted }) {
   const [bbox, setBbox] = useState(null);
   const [startDate, setStartDate] = useState(daysAgo(90));
   const [endDate, setEndDate] = useState(isoDay(new Date()));
@@ -252,12 +252,14 @@ function NewRunPanel({ api, providers, onStarted }) {
 
   const startRun = () => {
     if (!bbox || !selected.length || start.isPending || !grid || overBudget) return;
-    // One id per (box, dates) choice, stable across retries of that choice.
-    const key = JSON.stringify([bbox, RUN_MODE, [...selected].sort()]);
+    // One id per (box, project, dates) choice, stable across retries of that choice.
+    const key = JSON.stringify([bbox, RUN_MODE, projectId, [...selected].sort()]);
     if (requestRef.current.key !== key) requestRef.current = { key, value: createClientRequestId() };
     start.mutate({
       aoi: { west: bbox.west, south: bbox.south, east: bbox.east, north: bbox.north },
       mode: RUN_MODE,
+      // Without a project the backend uses the caller's default optical project.
+      ...(projectId ? { project_id: projectId } : {}),
       product_ids: selected,
       client_request_id: requestRef.current.value,
       ...(name.trim() ? { name: name.trim().slice(0, 120) } : {}),
@@ -794,6 +796,9 @@ export default function OpticalPage() {
   const navigate = useNavigate();
   const queryClient = useQueryClient();
   const { sceneId } = useParams();
+  // /optical?project=<id> works inside one project; plain /optical shows every run.
+  const [searchParams] = useSearchParams();
+  const projectId = searchParams.get('project') || null;
 
   const providersQuery = useQuery({
     queryKey: ['optical-providers', user?.id],
@@ -803,15 +808,22 @@ export default function OpticalPage() {
     retry: false,
   });
   const runsQuery = useQuery({
-    queryKey: ['optical-runs', user?.id],
-    queryFn: ({ signal }) => api.optical.listRuns({ signal }),
+    queryKey: ['optical-runs', user?.id, projectId],
+    queryFn: ({ signal }) => api.optical.listRuns({ signal, projectId }),
     enabled: Boolean(user?.id),
     refetchInterval: (query) => ((query.state.data || []).some((run) => !TERMINAL.has(run.status)) ? 8000 : false),
+  });
+  const projectQuery = useQuery({
+    queryKey: ['optical-project', user?.id, projectId],
+    queryFn: () => api.projects.get(projectId),
+    enabled: Boolean(user?.id && projectId),
+    staleTime: 60_000,
+    retry: false,
   });
   const providers = providersQuery.data;
   const runs = runsQuery.data || [];
 
-  const openRun = (id) => navigate(id ? `/optical/${id}` : '/optical');
+  const openRun = (id) => navigate(`${id ? `/optical/${id}` : '/optical'}${projectId ? `?project=${projectId}` : ''}`);
 
   return (
     <div className="min-h-screen bg-[#09090b] font-['Inter'] text-[13px] text-zinc-400 selection:bg-[#0088ff]/30">
@@ -823,7 +835,10 @@ export default function OpticalPage() {
             </Link>
             <div className="min-w-0">
               <h1 className="text-[15px] font-semibold tracking-tight text-white">Optical land cover</h1>
-              <p className="truncate text-[11px] text-zinc-500">Sentinel-2 · Raikou OlmoEarth India model · five classes at 10 m · compared with ESA WorldCover 2021</p>
+              <p className="truncate text-[11px] text-zinc-500">
+                {projectQuery.data?.name && <><span className="font-medium text-zinc-300">{projectQuery.data.name}</span> · </>}
+                Sentinel-2 · Raikou OlmoEarth India model · five classes at 10 m · compared with ESA WorldCover 2021
+              </p>
             </div>
           </div>
           {providers?.budget && (
@@ -848,6 +863,7 @@ export default function OpticalPage() {
               <NewRunPanel
                 api={api}
                 providers={providers}
+                projectId={projectId}
                 onStarted={(id) => {
                   queryClient.invalidateQueries({ queryKey: ['optical-runs', user?.id] });
                   queryClient.invalidateQueries({ queryKey: ['optical-providers', user?.id] });

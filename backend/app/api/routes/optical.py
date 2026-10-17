@@ -14,7 +14,7 @@ import logging
 from typing import Any, Callable, NoReturn
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, Query, status
 from starlette.concurrency import run_in_threadpool
 
 from app.api.deps import CurrentUser, get_current_user, resolve_owned_project, resolve_owned_scene
@@ -552,21 +552,20 @@ async def start_run(payload: OpticalRunCreate, current_user: CurrentUser = Depen
 
 
 @router.get("/runs", response_model=list[OpticalRunRead])
-async def list_runs(current_user: CurrentUser = Depends(get_current_user)) -> list[OpticalRunRead]:
+async def list_runs(
+    project_id: UUID | None = Query(default=None, description="Only the runs of this project; omit for all of the caller's runs."),
+    current_user: CurrentUser = Depends(get_current_user),
+) -> list[OpticalRunRead]:
     """The caller's optical runs, newest first."""
-    scenes = _rows(
-        await _execute(
-            lambda: get_supabase()
-            .table("scenes")
-            .select("*")
-            .eq("owner_id", current_user.id)
-            .eq("metadata->>pipeline", PIPELINE)
-            .order("created_at", desc=True)
-            .limit(100)
-            .execute(),
-            "Optical run data is temporarily unavailable",
-        )
-    )
+
+    def op() -> Any:
+        query = get_supabase().table("scenes").select("*").eq("owner_id", current_user.id).eq("metadata->>pipeline", PIPELINE)
+        if project_id is not None:
+            # owner_id is already pinned above, so another user's project id yields an empty list.
+            query = query.eq("project_id", str(project_id))
+        return query.order("created_at", desc=True).limit(100).execute()
+
+    scenes = _rows(await _execute(op, "Optical run data is temporarily unavailable"))
     ids = [str(s["id"]) for s in scenes]
     acquisitions = await _latest("scene_acquisitions", ids, current_user.id, {"collection": "SENTINEL-2"})
     jobs = await _latest("processing_jobs", ids, current_user.id, {"kind": "process_scene"})

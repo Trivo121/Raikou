@@ -394,8 +394,10 @@ export function createApiClient(getAccessToken) {
       startRun(input, { signal, timeoutMs = ACQUISITION_SEARCH_TIMEOUT_MS } = {}) {
         return request(apiPaths.opticalRuns, { method: 'POST', body: JSON.stringify(input), signal, timeoutMs });
       },
-      async listRuns({ signal } = {}) {
-        return unwrapCollection(await request(apiPaths.opticalRuns, { signal }), ['runs', 'items', 'data']);
+      // `projectId` limits the list to one project's runs; omit it for all of them.
+      async listRuns({ signal, projectId } = {}) {
+        const path = projectId ? `${apiPaths.opticalRuns}?project_id=${encodeURIComponent(projectId)}` : apiPaths.opticalRuns;
+        return unwrapCollection(await request(path, { signal }), ['runs', 'items', 'data']);
       },
       getRun(sceneId, { signal } = {}) {
         return request(apiPaths.opticalRun(sceneId), { signal });
