@@ -44,6 +44,7 @@ from app.services.optical.artifacts import EMBEDDINGS_KEY, RECORD_KEY, WINDOWS_K
 from app.services.optical.embeddings import LABEL as SIMILAR_LABEL
 from app.services.optical.embeddings import MEANING as SIMILAR_MEANING
 from app.services.optical.grid import GridError, OpticalGrid, estimate_pu, grid_for_box
+from app.services.optical.project import PROJECT_DESCRIPTION, PROJECT_MARKER, PROJECT_NAME, is_optical_project
 from app.services.storage.object_store import get_object_storage
 from app.services.storage.qdrant import QdrantStore
 
@@ -51,9 +52,6 @@ router = APIRouter()
 logger = logging.getLogger(__name__)
 
 PIPELINE = "optical"
-PROJECT_NAME = "Optical land cover"
-PROJECT_MARKER = "raikou:optical-workspace"
-PROJECT_DESCRIPTION = f"Sentinel-2 land-cover runs from the Optical page. ({PROJECT_MARKER})"
 SEASONS = [
     ("post_monsoon", "10-15", "11-30"),
     ("rabi", "01-15", "02-28"),
@@ -387,6 +385,10 @@ async def start_run(payload: OpticalRunCreate, current_user: CurrentUser = Depen
         reason = "model_unavailable"
     if reason is not None:
         raise _unavailable(reason)
+
+    # Land-cover runs belong in optical projects. Refuse before any provider call or budget check.
+    if payload.project_id is not None and not is_optical_project(await resolve_owned_project(payload.project_id, current_user)):
+        raise HTTPException(status_code=409, detail="That project is for SAR imagery. Create an optical project to map land cover.")
 
     # A retried POST returns the original run and creates nothing.
     if payload.client_request_id:

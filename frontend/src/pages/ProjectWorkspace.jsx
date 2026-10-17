@@ -5,7 +5,8 @@ import {
   LoaderCircle, MapPin, MessageSquare, Plus, Radar, RefreshCw, Satellite, Search,
   ShieldCheck, X,
 } from 'lucide-react';
-import { Link, useNavigate, useParams, useSearchParams } from 'react-router-dom';
+import { Link, Navigate, useNavigate, useParams, useSearchParams } from 'react-router-dom';
+import { isOpticalProject } from '../utils/projects';
 import { useAuth } from '../auth/AuthProvider';
 import JobStatusCard, { isTerminalJobStatus } from '../components/JobStatusCard';
 import SceneUploadPanel from '../components/SceneUploadPanel';
@@ -229,6 +230,9 @@ export default function ProjectWorkspace() {
   if (projectQuery.isError) {
     return <WorkspaceState title="Project unavailable" detail={projectQuery.error.message} action={() => navigate('/dashboard')} />;
   }
+
+  // Optical projects have their own workspace; this one would only show an empty scene list.
+  if (isOpticalProject(workspace?.project)) return <Navigate to={`/optical?project=${projectId}`} replace />;
 
   const project = workspace?.project;
   const openPreview = (artifact) => {

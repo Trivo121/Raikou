@@ -15,6 +15,7 @@ import {
 } from 'lucide-react';
 import { useNavigate } from 'react-router-dom';
 import { useApi, useAuth } from '../auth/AuthProvider';
+import { OPTICAL_DESCRIPTION, isOpticalProject, projectPath } from '../utils/projects';
 
 /* ─── Helpers (unchanged) ──────────────────────────────────────────────────── */
 
@@ -28,20 +29,6 @@ function formatDate(value) {
 
 function projectName(project) {
   return project.name || project.title || 'Untitled project';
-}
-
-// An optical project is marked in its description (the backend finds the optical
-// workspace the same way). It opens the optical page scoped to itself rather than
-// the SAR workspace.
-const OPTICAL_MARKER = 'raikou:optical-workspace';
-const OPTICAL_DESCRIPTION = `Sentinel-2 land-cover runs. (${OPTICAL_MARKER})`;
-
-function isOpticalProject(project) {
-  return String(project?.description || '').includes(OPTICAL_MARKER);
-}
-
-function projectPath(project) {
-  return isOpticalProject(project) ? `/optical?project=${project.id}` : `/projects/${project.id}`;
 }
 
 // What a new project is for. Chosen after naming it, with no default.

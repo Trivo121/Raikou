@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
-import { Link, useNavigate, useParams, useSearchParams } from 'react-router-dom';
+import { Link, Navigate, useNavigate, useParams, useSearchParams } from 'react-router-dom';
 import {
   AlertTriangle,
   ArrowLeft,
@@ -25,6 +25,7 @@ import { useApi, useAuth } from '../auth/AuthProvider';
 import AoiMapPicker from '../components/AoiMapPicker';
 import GroundedChatPanel from '../components/GroundedChatPanel';
 import { createClientRequestId } from '../utils/helpers';
+import { isOpticalProject } from '../utils/projects';
 
 /* ─── Constants ────────────────────────────────────────────────────────────── */
 
@@ -824,6 +825,9 @@ export default function OpticalPage() {
   const runs = runsQuery.data || [];
 
   const openRun = (id) => navigate(`${id ? `/optical/${id}` : '/optical'}${projectId ? `?project=${projectId}` : ''}`);
+
+  // A SAR project has no land-cover runs; send it to its own workspace.
+  if (projectId && projectQuery.data && !isOpticalProject(projectQuery.data)) return <Navigate to={`/projects/${projectId}`} replace />;
 
   return (
     <div className="min-h-screen bg-[#09090b] font-['Inter'] text-[13px] text-zinc-400 selection:bg-[#0088ff]/30">

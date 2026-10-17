@@ -13,6 +13,7 @@ from app.api.deps import CurrentUser, get_current_user, resolve_owned_project
 from app.schemas.projects import ProjectCreate, ProjectRead, ProjectUpdate
 from app.schemas.scenes import SceneCreate, SceneRead
 from app.services.database import get_supabase
+from app.services.optical.project import is_optical_project
 
 router = APIRouter()
 logger = logging.getLogger(__name__)
@@ -202,7 +203,12 @@ async def create_project_scene(
     payload: SceneCreate,
     current_user: CurrentUser = Depends(get_current_user),
 ) -> SceneRead:
-    await resolve_owned_project(project_id, current_user)
+    project = await resolve_owned_project(project_id, current_user)
+    if is_optical_project(project):
+        raise HTTPException(
+            status_code=409,
+            detail="This is an optical project. Start land-cover runs from the optical page; SAR scenes belong in a SAR project.",
+        )
     insert_data = payload.model_dump(mode="json")
     insert_data.update(
         {
