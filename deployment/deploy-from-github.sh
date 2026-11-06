@@ -39,6 +39,10 @@ if ! grep -q '^REDIS_URL=' "$APP_DIR/.env"; then
     echo "The production config check below will report exactly what is missing."
   fi
 fi
+if ! grep -q '^CORS_ORIGINS=' "$APP_DIR/.env"; then
+  echo 'CORS_ORIGINS=https://raikou-trivos-projects.vercel.app' >> "$APP_DIR/.env"
+  echo "Added CORS_ORIGINS=https://raikou-trivos-projects.vercel.app to .env."
+fi
 PREFLIGHT="/home/ubuntu/raikou-preflight-$TS"
 mkdir -p "$PREFLIGHT"
 cp -r "$SRC_DIR/backend/app" "$PREFLIGHT/app"

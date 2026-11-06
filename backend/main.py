@@ -68,6 +68,7 @@ async def shutdown() -> None:
 app.add_middleware(
     CORSMiddleware,
     allow_origins=settings.CORS_ORIGINS,
+    allow_origin_regex=settings.CORS_ORIGIN_REGEX,
     allow_credentials=settings.CORS_ALLOW_CREDENTIALS,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -98,6 +99,8 @@ if settings.ENABLE_LEGACY_SESSION_API:
 
 
 @app.get("/healthz", tags=["health"])
+@app.get(f"{settings.API_V1_STR}/healthz", tags=["health"])
+@app.get("/api/healthz", tags=["health"])
 async def healthz() -> dict[str, str]:
     """Liveness probe: the HTTP process is accepting requests."""
     return {"status": "ok"}

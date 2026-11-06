@@ -4,12 +4,14 @@ const configuredApiBaseUrl = (
   || ''
 ).replace(/\/$/, '');
 
-// In production the frontend and API share an origin through Nginx.  A local
-// development override must never make a visitor's browser call itself.
+// In production the frontend and API share an origin through the deployment
+// gateway.  In particular, a stale `http://<EC2-IP>` Vercel variable would be
+// mixed content on the HTTPS site and bypass that gateway, so only an explicit
+// HTTPS override is allowed outside development.
 const API_BASE_URL = (
-  import.meta.env.PROD && /^https?:\/\/localhost(?::\d+)?$/.test(configuredApiBaseUrl)
-    ? ''
-    : (configuredApiBaseUrl || (import.meta.env.DEV ? 'http://localhost:8000' : ''))
+  import.meta.env.PROD
+    ? (configuredApiBaseUrl.startsWith('https://') ? configuredApiBaseUrl : '')
+    : (configuredApiBaseUrl || 'http://localhost:8000')
 );
 
 const DEFAULT_REQUEST_TIMEOUT_MS = 30_000;

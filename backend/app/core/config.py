@@ -27,6 +27,9 @@ class Settings(BaseSettings):
     CORS_ORIGINS: Annotated[list[str], NoDecode] = Field(
         default_factory=lambda: ["http://localhost:3000", "http://localhost:5173"]
     )
+    CORS_ORIGIN_REGEX: str | None = Field(
+        default=r"^https:\/\/([a-zA-Z0-9-]+\.)*vercel\.app$"
+    )
     CORS_ALLOW_CREDENTIALS: bool = True
     # Session-ID routes predate the V1 ownership model. They are opt-in only
     # for local prototype compatibility until M3 moves ingestion/processing to
@@ -362,6 +365,14 @@ class Settings(BaseSettings):
             return [origin.strip() for origin in value.split(",") if origin.strip()]
         return value
 
+    @field_validator("CORS_ORIGIN_REGEX", mode="before")
+    @classmethod
+    def normalize_cors_origin_regex(cls, value: object) -> object:
+        if isinstance(value, str):
+            value = value.strip()
+            return value or None
+        return value
+
     @field_validator("REDIS_URL", mode="before")
     @classmethod
     def normalize_redis_url(cls, value: object) -> object:
@@ -539,8 +550,8 @@ class Settings(BaseSettings):
             issues.append("SUPABASE_SERVICE_KEY is not configured")
         if not self.QDRANT_URL:
             issues.append("QDRANT_URL is not configured")
-        if not self.CORS_ORIGINS:
-            issues.append("CORS_ORIGINS must contain at least one frontend origin")
+        if not self.CORS_ORIGINS and not self.CORS_ORIGIN_REGEX:
+            issues.append("CORS_ORIGINS or CORS_ORIGIN_REGEX must contain at least one frontend origin")
         if self.is_production:
             if not self.REDIS_URL:
                 issues.append("REDIS_URL is not configured")
@@ -569,9 +580,9 @@ class Settings(BaseSettings):
             }
             if "*" in normalized_origins:
                 issues.append("CORS_ORIGINS cannot contain '*' in production")
-            if not non_local_origins:
+            if not non_local_origins and not self.CORS_ORIGIN_REGEX:
                 issues.append("CORS_ORIGINS must contain a non-local frontend origin in production")
-            if len(non_local_origins) != len(normalized_origins):
+            if len(non_local_origins) != len(normalized_origins) and not self.CORS_ORIGIN_REGEX:
                 issues.append("CORS_ORIGINS cannot contain local development origins in production")
         if self.is_production and self.ENABLE_LEGACY_SESSION_API:
             issues.append(

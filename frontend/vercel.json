@@ -10,6 +10,14 @@
       "destination": "http://15.207.114.160/api/:path*"
     },
     {
+      "source": "/healthz",
+      "destination": "http://15.207.114.160/healthz"
+    },
+    {
+      "source": "/readyz",
+      "destination": "http://15.207.114.160/readyz"
+    },
+    {
       "source": "/(.*)",
       "destination": "/index.html"
     }
