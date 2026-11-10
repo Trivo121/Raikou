@@ -896,19 +896,31 @@ class S3ObjectStorage:
 def _create_s3_client(backend: StorageBackend) -> BaseClient:
     """Create a signed S3 API client from centralized application settings."""
 
+    config_kwargs: dict[str, Any] = {
+        "signature_version": "s3v4",
+        "retries": {"max_attempts": 3, "mode": "standard"},
+        "s3": {
+            "addressing_style": "path"
+            if settings.storage_force_path_style
+            else "virtual"
+        },
+    }
+    # Newer botocore defaults to AWS-chunked trailing checksums, which
+    # GCS XML interoperability and certain S3-compatible proxies reject.
+    try:
+        config = Config(
+            request_checksum_calculation="when_required",
+            response_checksum_validation="when_required",
+            **config_kwargs,
+        )
+    except TypeError:
+        config = Config(**config_kwargs)
+
     client_kwargs: dict[str, Any] = {
         "service_name": "s3",
         "region_name": settings.STORAGE_REGION,
         "endpoint_url": settings.STORAGE_ENDPOINT_URL,
-        "config": Config(
-            signature_version="s3v4",
-            retries={"max_attempts": 3, "mode": "standard"},
-            s3={
-                "addressing_style": "path"
-                if settings.storage_force_path_style
-                else "virtual"
-            },
-        ),
+        "config": config,
     }
     if settings.STORAGE_ACCESS_KEY_ID:
         client_kwargs["aws_access_key_id"] = settings.STORAGE_ACCESS_KEY_ID
