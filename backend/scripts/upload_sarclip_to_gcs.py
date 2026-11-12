@@ -12,7 +12,6 @@ from __future__ import annotations
 
 import json
 import math
-import os
 import sys
 import time
 from pathlib import Path
@@ -53,6 +52,8 @@ def get_s3_client(env: dict[str, str]):
         signature_version="s3v4",
         request_checksum_calculation="when_required",
         response_checksum_validation="when_required",
+        connect_timeout=30,
+        read_timeout=300,
         retries={"max_attempts": 5, "mode": "standard"},
         s3={"addressing_style": "virtual"},
     )
@@ -66,6 +67,22 @@ def get_s3_client(env: dict[str, str]):
         config=config,
     )
     return client, bucket
+
+
+def list_all_parts(s3, bucket: str, key: str, upload_id: str) -> dict[int, str]:
+    existing_parts: dict[int, str] = {}
+    marker = 0
+    while True:
+        kwargs = {"Bucket": bucket, "Key": key, "UploadId": upload_id}
+        if marker:
+            kwargs["PartNumberMarker"] = marker
+        resp = s3.list_parts(**kwargs)
+        for p in resp.get("Parts", []):
+            existing_parts[p["PartNumber"]] = p["ETag"]
+        if not resp.get("IsTruncated"):
+            break
+        marker = resp.get("NextPartNumberMarker", 0)
+    return existing_parts
 
 
 def main() -> int:
@@ -111,11 +128,10 @@ def main() -> int:
     existing_parts: dict[int, str] = {}
     if upload_id:
         try:
-            resp = s3.list_parts(Bucket=bucket, Key=REMOTE_KEY, UploadId=upload_id)
-            for p in resp.get("Parts", []):
-                existing_parts[p["PartNumber"]] = p["ETag"]
+            existing_parts = list_all_parts(s3, bucket, REMOTE_KEY, upload_id)
             print(f"🔄 Resuming upload {upload_id[:16]}... ({len(existing_parts)}/{total_parts} parts already uploaded)")
-        except Exception:
+        except Exception as exc:
+            print(f"⚠️ Previous upload session expired or unavailable ({exc}). Starting fresh.")
             upload_id = None
 
     if not upload_id:
@@ -136,7 +152,11 @@ def main() -> int:
     completed_parts = [{"PartNumber": num, "ETag": etag} for num, etag in sorted(existing_parts.items())]
 
     start_time = time.time()
-    uploaded_bytes = sum(PART_SIZE if num < total_parts else (file_size - (num - 1) * PART_SIZE) for num in existing_parts)
+    session_bytes = 0
+    uploaded_bytes = sum(
+        PART_SIZE if num < total_parts else (file_size - (num - 1) * PART_SIZE)
+        for num in existing_parts
+    )
 
     with open(LOCAL_MODEL_PATH, "rb") as f:
         for part_num in range(1, total_parts + 1):
@@ -148,11 +168,10 @@ def main() -> int:
             f.seek(offset)
             chunk = f.read(chunk_length)
 
-            # Retry loop for each part
-            max_retries = 5
+            # Retry loop for each part (up to 30 attempts, surviving up to ~10 mins of drop)
+            max_retries = 30
             part_etag = None
             for attempt in range(1, max_retries + 1):
-                part_start = time.time()
                 try:
                     resp = s3.upload_part(
                         Bucket=bucket,
@@ -164,8 +183,13 @@ def main() -> int:
                     part_etag = resp["ETag"]
                     break
                 except (BotoCoreError, ClientError, Exception) as exc:
-                    print(f"\n⚠️ Part {part_num}/{total_parts} attempt {attempt} failed ({exc}). Retrying in {attempt*2}s...")
-                    time.sleep(attempt * 2)
+                    wait_s = min(attempt * 5, 30)
+                    print(
+                        f"\n⚠️ Part {part_num}/{total_parts} attempt {attempt}/{max_retries} "
+                        f"failed ({exc}). Recreating client & retrying in {wait_s}s..."
+                    )
+                    time.sleep(wait_s)
+                    s3, bucket = get_s3_client(env)
 
             if not part_etag:
                 print(f"\n❌ Failed to upload part {part_num} after {max_retries} attempts.")
@@ -174,8 +198,9 @@ def main() -> int:
 
             completed_parts.append({"PartNumber": part_num, "ETag": part_etag})
             uploaded_bytes += chunk_length
+            session_bytes += chunk_length
             elapsed = time.time() - start_time
-            speed = (uploaded_bytes / (1024 * 1024)) / max(elapsed, 0.001)
+            speed = (session_bytes / (1024 * 1024)) / max(elapsed, 0.001)
             pct = (uploaded_bytes / file_size) * 100
             print(
                 f"\rPart {part_num}/{total_parts} OK | "
