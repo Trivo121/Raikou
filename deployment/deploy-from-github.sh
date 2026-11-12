@@ -40,8 +40,8 @@ if ! grep -q '^REDIS_URL=' "$APP_DIR/.env"; then
   fi
 fi
 if ! grep -q '^CORS_ORIGINS=' "$APP_DIR/.env"; then
-  echo 'CORS_ORIGINS=https://raikou-trivos-projects.vercel.app' >> "$APP_DIR/.env"
-  echo "Added CORS_ORIGINS=https://raikou-trivos-projects.vercel.app to .env."
+  echo 'CORS_ORIGINS=https://www.raikou.site,https://raikou.site,https://raikou-trivos-projects.vercel.app' >> "$APP_DIR/.env"
+  echo "Added CORS_ORIGINS=https://www.raikou.site,https://raikou.site,https://raikou-trivos-projects.vercel.app to .env."
 fi
 PREFLIGHT="/home/ubuntu/raikou-preflight-$TS"
 mkdir -p "$PREFLIGHT"

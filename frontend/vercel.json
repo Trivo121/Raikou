@@ -7,15 +7,15 @@
   "rewrites": [
     {
       "source": "/api/:path*",
-      "destination": "http://15.207.114.160/api/:path*"
+      "destination": "https://api.raikou.site/api/:path*"
     },
     {
       "source": "/healthz",
-      "destination": "http://15.207.114.160/healthz"
+      "destination": "https://api.raikou.site/healthz"
     },
     {
       "source": "/readyz",
-      "destination": "http://15.207.114.160/readyz"
+      "destination": "https://api.raikou.site/readyz"
     },
     {
       "source": "/(.*)",
