@@ -1,4 +1,4 @@
- # Raikou
+# Raikou
 
 **Teaching AI to read radar.**
 
